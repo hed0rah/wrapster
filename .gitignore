@@ -1,0 +1,16 @@
+# binaries
+/wrapster
+/wrapster.exe
+/wrapster-linux-amd64
+/wrapster-linux-arm
+/wrapster-darwin-arm64
+
+# policy (may contain hostnames, paths, credentials)
+policy.yaml
+
+# audit logs
+*.log
+audit.json
+
+# local notes
+CHEATSHEET.md

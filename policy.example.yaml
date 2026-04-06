@@ -1,0 +1,125 @@
+# wrapster policy configuration
+#
+# Deny-by-default: only commands matching an allowed_commands rule will execute.
+# Hard-coded safety rules (rm -rf /, dd to devices, etc.) are always blocked.
+
+defaults:
+  # SSH connection defaults (overridable per-host)
+  port: 22
+  # user: deploy
+  # identity_file: ~/.ssh/id_ed25519
+
+  # Execution limits
+  timeout: 30s
+  max_output_bytes: 1048576  # 1 MiB
+
+  # Shell injection protection: when false (default), commands containing
+  # ; | & ` $() {} are rejected. Set true only if you need pipes/chaining
+  # and trust the command patterns in your allowlist.
+  allow_shell_operators: false
+
+  # Default allowed commands, available on ALL hosts.
+  allowed_commands:
+    - command: uptime
+      description: "System uptime"
+
+    - command: hostname
+      description: "Show hostname"
+
+    - command: whoami
+      description: "Current user"
+
+    - command: df
+      args_pattern: "-[hTi]+( /[a-zA-Z0-9/_-]*)?"
+      description: "Disk usage (safe flags only)"
+
+    - command: free
+      args_pattern: "-[mghb]?"
+      description: "Memory usage"
+
+    - command: uname
+      args_pattern: "-[asnrvmpio]*"
+      description: "System info"
+
+    - command: date
+      description: "Current date/time"
+
+    - command: ps
+      args_pattern: "(aux|ef|--no-headers.*)"
+      description: "Process list (read-only)"
+
+    - command: systemctl
+      args_pattern: "status .+"
+      description: "Service status (read-only)"
+
+    - command: journalctl
+      args_pattern: "--no-pager (-u .+|--since .+|-n \\d+).*"
+      description: "Journal logs (read-only)"
+
+    - command: docker
+      args_pattern: "(ps|stats|logs|inspect) .*"
+      description: "Docker read-only commands"
+
+    - command: kubectl
+      args_pattern: "(get|describe|logs|top) .*"
+      description: "Kubernetes read-only commands"
+
+  # Patterns always denied (applied before allowlist).
+  denied_patterns:
+    - "sudo"
+    - "\\brm\\b"
+    - "\\bmv\\b"
+    - ">>"       # append redirect
+    - ">"        # write redirect
+
+# Per-host overrides, merged with defaults.
+hosts:
+  prod-web:
+    user: deploy
+    identity_file: ~/.ssh/prod_ed25519
+    ssh_options:
+      ProxyJump: bastion.example.com
+    allowed_commands:
+      - command: nginx
+        args_pattern: "-t|-T|-s reload"
+        description: "Nginx config test or reload"
+
+      - command: tail
+        args_pattern: "-n \\d+ /var/log/nginx/(access|error)\\.log"
+        description: "Read nginx logs (last N lines)"
+
+  prod-db:
+    user: dbadmin
+    port: 2222
+    timeout: 60s
+    allowed_commands:
+      - command: psql
+        args_pattern: "-c ['\"]SELECT .+['\"]"
+        description: "PostgreSQL SELECT queries only"
+
+      - command: pg_isready
+        description: "PostgreSQL health check"
+
+    denied_patterns:
+      - "DROP"
+      - "DELETE"
+      - "TRUNCATE"
+      - "ALTER"
+      - "INSERT"
+      - "UPDATE"
+
+  staging:
+    user: deploy
+    # More permissive on staging, allow shell operators for pipes.
+    allow_shell_operators: true
+    allowed_commands:
+      - command: tail
+        args_pattern: ".*"
+        description: "Tail any file"
+
+      - pattern: "cat /var/log/.+"
+        description: "Read log files"
+
+      - command: grep
+        args_pattern: ".*"
+        description: "Search files"
