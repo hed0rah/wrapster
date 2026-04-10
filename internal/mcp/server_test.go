@@ -105,15 +105,15 @@ func TestToolsList(t *testing.T) {
 	var result toolsListResult
 	json.Unmarshal(b, &result)
 
-	if len(result.Tools) != 10 {
-		t.Fatalf("expected 10 tools, got %d", len(result.Tools))
+	if len(result.Tools) != 12 {
+		t.Fatalf("expected 12 tools, got %d", len(result.Tools))
 	}
 
 	names := map[string]bool{}
 	for _, tool := range result.Tools {
 		names[tool.Name] = true
 	}
-	for _, expected := range []string{"exec", "ssh_exec", "ssh_validate", "ssh_list_allowed", "batch_exec", "get_stats"} {
+	for _, expected := range []string{"exec", "ssh_exec", "ssh_validate", "ssh_list_allowed", "batch_exec", "find_files", "grep_files", "get_stats"} {
 		if !names[expected] {
 			t.Errorf("missing tool %q", expected)
 		}

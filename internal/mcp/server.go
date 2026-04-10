@@ -487,6 +487,75 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			Content: []contentBlock{{Type: "text", Text: fmt.Sprintf("invalidated: %s %s", host, command)}},
 		})
 
+	case "find_files":
+		host, _ := params.Arguments["host"].(string)
+		query, _ := params.Arguments["query"].(string)
+		if host == "" || query == "" {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "host and query are required"}}})
+		}
+		searchPath := "."
+		if v, ok := params.Arguments["path"].(string); ok && v != "" {
+			searchPath = v
+		}
+		maxResults := 50
+		if v, ok := params.Arguments["max_results"].(float64); ok && v > 0 {
+			maxResults = int(v)
+		}
+
+		cmd := findFilesCmd(query, searchPath, maxResults)
+		stdout, stderr, err := rawExec(ctx, r, host, cmd)
+		if err != nil {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "exec error: " + err.Error()}}})
+		}
+		out := strings.TrimRight(stdout, "\n")
+		if out == "" {
+			out = "(no matches)"
+		}
+		if stderr != "" {
+			out += "\n--- stderr ---\n" + strings.TrimRight(stderr, "\n")
+		}
+		if len(out) > 4096 && r.BufStore != nil {
+			bufID := r.BufStore.Put(out)
+			out = fmt.Sprintf("// truncated -- buf_id=%s total=%d\n%s\n[...%d bytes remaining, use get_output]",
+				bufID, r.BufStore.Len(bufID), out[:4096], r.BufStore.Len(bufID)-4096)
+		}
+		return respond(id, toolResult{Content: []contentBlock{{Type: "text", Text: out}}})
+
+	case "grep_files":
+		host, _ := params.Arguments["host"].(string)
+		pattern, _ := params.Arguments["pattern"].(string)
+		if host == "" || pattern == "" {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "host and pattern are required"}}})
+		}
+		searchPath := "."
+		if v, ok := params.Arguments["path"].(string); ok && v != "" {
+			searchPath = v
+		}
+		glob, _ := params.Arguments["glob"].(string)
+		maxResults := 50
+		if v, ok := params.Arguments["max_results"].(float64); ok && v > 0 {
+			maxResults = int(v)
+		}
+
+		cmd := grepFilesCmd(pattern, searchPath, glob, maxResults)
+		stdout, stderr, err := rawExec(ctx, r, host, cmd)
+		if err != nil {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "exec error: " + err.Error()}}})
+		}
+		out := strings.TrimRight(stdout, "\n")
+		if out == "" {
+			out = "(no matches)"
+		}
+		if stderr != "" {
+			out += "\n--- stderr ---\n" + strings.TrimRight(stderr, "\n")
+		}
+		if len(out) > 4096 && r.BufStore != nil {
+			bufID := r.BufStore.Put(out)
+			out = fmt.Sprintf("// truncated -- buf_id=%s total=%d\n%s\n[...%d bytes remaining, use get_output]",
+				bufID, r.BufStore.Len(bufID), out[:4096], r.BufStore.Len(bufID)-4096)
+		}
+		return respond(id, toolResult{Content: []contentBlock{{Type: "text", Text: out}}})
+
 	case "get_stats":
 		if r.OutputStats == nil {
 			return respond(id, toolResult{
@@ -611,6 +680,62 @@ func processOutput(r *runner.Runner, result *runner.RunResult) {
 	if r.OutputStats != nil {
 		r.OutputStats.Record(rawLen, outLen)
 	}
+}
+
+// rawExec runs a server-constructed command on the given host without policy
+// validation. The caller is responsible for building safe commands from
+// sanitized inputs (use shellQuote on all user-supplied values).
+func rawExec(ctx context.Context, r *runner.Runner, host, cmd string) (string, string, error) {
+	if host == "local" {
+		return r.ExecRawLocal(ctx, cmd)
+	}
+	return r.ExecRaw(ctx, host, cmd)
+}
+
+// shellQuote wraps s in single quotes, escaping any embedded single quotes.
+// This is safe for POSIX shells (sh, bash, dash). Never use with cmd.exe.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// findFilesCmd builds a shell command that searches for filenames matching query
+// under path. Tries fd first (faster, respects .gitignore), falls back to find.
+func findFilesCmd(query, path string, maxResults int) string {
+	q := shellQuote(query)
+	p := shellQuote(path)
+	// For find -iname the glob pattern needs *query*; shellQuote("*q*") passes
+	// the literal asterisks to find, which interprets them as globs itself.
+	iname := shellQuote("*" + query + "*")
+	n := fmt.Sprintf("%d", maxResults)
+	return fmt.Sprintf(
+		"command -v fd >/dev/null 2>&1"+
+			" && fd --color=never -H -t f -- %s %s 2>/dev/null | head -%s"+
+			" || find %s -iname %s 2>/dev/null | head -%s",
+		q, p, n, p, iname, n,
+	)
+}
+
+// grepFilesCmd builds a shell command that searches file contents for pattern
+// under path. Tries rg first, falls back to grep -r.
+func grepFilesCmd(pattern, path, glob string, maxResults int) string {
+	pat := shellQuote(pattern)
+	p := shellQuote(path)
+	n := fmt.Sprintf("%d", maxResults)
+	if glob != "" {
+		g := shellQuote(glob)
+		return fmt.Sprintf(
+			"command -v rg >/dev/null 2>&1"+
+				" && rg --color=never -n -- %s --glob %s %s 2>/dev/null | head -%s"+
+				" || grep -rn --color=never --include=%s -- %s %s 2>/dev/null | head -%s",
+			pat, g, p, n, g, pat, p, n,
+		)
+	}
+	return fmt.Sprintf(
+		"command -v rg >/dev/null 2>&1"+
+			" && rg --color=never -n -- %s %s 2>/dev/null | head -%s"+
+			" || grep -rn --color=never -- %s %s 2>/dev/null | head -%s",
+		pat, p, n, pat, p, n,
+	)
 }
 
 func toolDefinitions() []toolDef {
@@ -759,6 +884,35 @@ func toolDefinitions() []toolDef {
 						"description": "Command string of the entry to invalidate",
 					},
 				},
+			},
+		},
+		{
+			Name:        "find_files",
+			Description: "Search for files by name on a host. Uses fd if available, falls back to find. Results are filenames only (no content). Use grep_files to search by content.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"host":        map[string]any{"type": "string", "description": "Target host or 'local'"},
+					"query":       map[string]any{"type": "string", "description": "Filename substring to search for (case-insensitive)"},
+					"path":        map[string]any{"type": "string", "description": "Directory to search in (default '.')"},
+					"max_results": map[string]any{"type": "integer", "description": "Max results to return (default 50)"},
+				},
+				"required": []string{"host", "query"},
+			},
+		},
+		{
+			Name:        "grep_files",
+			Description: "Search file contents on a host for lines matching a regex. Uses rg (ripgrep) if available, falls back to grep -r. Returns matching lines with filename and line number.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"host":        map[string]any{"type": "string", "description": "Target host or 'local'"},
+					"pattern":     map[string]any{"type": "string", "description": "Regex pattern to search for"},
+					"path":        map[string]any{"type": "string", "description": "Directory to search in (default '.')"},
+					"glob":        map[string]any{"type": "string", "description": "File glob filter, e.g. '*.go' or '*.py' (optional)"},
+					"max_results": map[string]any{"type": "integer", "description": "Max matching lines to return (default 50)"},
+				},
+				"required": []string{"host", "pattern"},
 			},
 		},
 		{
