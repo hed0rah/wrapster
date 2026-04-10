@@ -10,6 +10,7 @@ import (
 	"github.com/hed0rah/wrapster/internal/bufstore"
 	"github.com/hed0rah/wrapster/internal/cache"
 	"github.com/hed0rah/wrapster/internal/filter"
+	"github.com/hed0rah/wrapster/internal/hostinfo"
 	"github.com/hed0rah/wrapster/internal/output"
 	"github.com/hed0rah/wrapster/internal/policy"
 	"github.com/hed0rah/wrapster/internal/ssh"
@@ -33,12 +34,13 @@ type RunResult struct {
 
 // Runner holds shared state for executing validated commands.
 type Runner struct {
-	Policy       *policy.Policy
-	Logger       *audit.Logger
-	Filters      *filter.Chain
-	OutputStats  *output.Tracker
-	ResultCache  *cache.ResultCache
-	BufStore     *bufstore.Store
+	Policy        *policy.Policy
+	Logger        *audit.Logger
+	Filters       *filter.Chain
+	OutputStats   *output.Tracker
+	ResultCache   *cache.ResultCache
+	BufStore      *bufstore.Store
+	HostInfoCache *hostinfo.Cache
 }
 
 // OutputConfig returns the output processing config from the policy.
@@ -325,6 +327,26 @@ func (r *Runner) BatchExecLocal(ctx context.Context, commands []string) BatchRes
 // ListAllowed returns the resolved policy for a host.
 func (r *Runner) ListAllowed(host string) policy.HostPolicy {
 	return r.Policy.ResolvedPolicy(host)
+}
+
+// ExecRaw runs a command on a host and returns (stdout, stderr, error) without
+// policy validation. Intended for internal probing (e.g. host_info fingerprinting)
+// where the caller is responsible for constructing safe commands.
+func (r *Runner) ExecRaw(ctx context.Context, host, command string) (string, string, error) {
+	resolved := r.Policy.ResolvedPolicy(host)
+	sshHost := host
+	if resolved.Hostname != "" {
+		sshHost = resolved.Hostname
+	}
+	result, err := ssh.Exec(ctx, ssh.ExecOptions{
+		Host:    sshHost,
+		Command: command,
+		Policy:  resolved,
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return result.Stdout, result.Stderr, nil
 }
 
 func formatFindings(findings []filter.Finding) string {

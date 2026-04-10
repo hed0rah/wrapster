@@ -105,8 +105,8 @@ func TestToolsList(t *testing.T) {
 	var result toolsListResult
 	json.Unmarshal(b, &result)
 
-	if len(result.Tools) != 9 {
-		t.Fatalf("expected 9 tools, got %d", len(result.Tools))
+	if len(result.Tools) != 10 {
+		t.Fatalf("expected 10 tools, got %d", len(result.Tools))
 	}
 
 	names := map[string]bool{}
@@ -292,8 +292,18 @@ func TestServeStdio(t *testing.T) {
 		done <- Serve(r)
 	}()
 
+	// Drain stdout concurrently to prevent pipe-buffer deadlock when responses
+	// are large (tools/list with many tools exceeds the ~4KB Windows pipe buffer).
+	var rawOut bytes.Buffer
+	readDone := make(chan struct{})
+	go func() {
+		io.Copy(&rawOut, stdoutR)
+		close(readDone)
+	}()
+
 	err := <-done
 	stdoutW.Close()
+	<-readDone
 
 	if err != nil {
 		t.Fatalf("Serve returned error: %v", err)
@@ -301,7 +311,7 @@ func TestServeStdio(t *testing.T) {
 
 	// Read responses
 	var responses []jsonrpcResponse
-	scanner := bufio.NewScanner(stdoutR)
+	scanner := bufio.NewScanner(&rawOut)
 	for scanner.Scan() {
 		var resp jsonrpcResponse
 		if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {

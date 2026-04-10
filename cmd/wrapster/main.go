@@ -14,6 +14,7 @@ import (
 	"github.com/hed0rah/wrapster/internal/bufstore"
 	"github.com/hed0rah/wrapster/internal/cache"
 	"github.com/hed0rah/wrapster/internal/filter"
+	"github.com/hed0rah/wrapster/internal/hostinfo"
 	"github.com/hed0rah/wrapster/internal/mcp"
 	"github.com/hed0rah/wrapster/internal/output"
 	"github.com/hed0rah/wrapster/internal/policy"
@@ -96,12 +97,13 @@ func main() {
 	}
 
 	r := &runner.Runner{
-		Policy:      pol,
-		Logger:      logger,
-		Filters:     chain,
-		OutputStats: &output.Tracker{},
-		ResultCache: cache.New(30 * time.Second),
-		BufStore:    bufstore.New(),
+		Policy:        pol,
+		Logger:        logger,
+		Filters:       chain,
+		OutputStats:   &output.Tracker{},
+		ResultCache:   cache.New(30 * time.Second),
+		BufStore:      bufstore.New(),
+		HostInfoCache: hostinfo.New(30 * time.Minute),
 	}
 
 	// --mcp mode (stdio)

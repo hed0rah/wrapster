@@ -12,6 +12,7 @@ import (
 
 	"github.com/hed0rah/wrapster/internal/audit"
 	"github.com/hed0rah/wrapster/internal/cache"
+	"github.com/hed0rah/wrapster/internal/hostinfo"
 	"github.com/hed0rah/wrapster/internal/output"
 	"github.com/hed0rah/wrapster/internal/policy"
 	"github.com/hed0rah/wrapster/internal/runner"
@@ -394,6 +395,29 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			Content: []contentBlock{{Type: "text", Text: string(out)}},
 		})
 
+	case "host_info":
+		host, _ := params.Arguments["host"].(string)
+		refresh, _ := params.Arguments["refresh"].(bool)
+		if host == "" {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "host is required"}}})
+		}
+		if r.HostInfoCache == nil {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "host info cache not enabled"}}})
+		}
+		if !refresh {
+			if info := r.HostInfoCache.Get(host); info != nil {
+				return respond(id, toolResult{Content: []contentBlock{{Type: "text", Text: info.JSON()}}})
+			}
+		}
+		info, err := hostinfo.Fingerprint(ctx, host, func(ctx context.Context, h, cmd string) (string, string, error) {
+			return r.ExecRaw(ctx, h, cmd)
+		})
+		if err != nil {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "fingerprint failed: " + err.Error()}}})
+		}
+		r.HostInfoCache.Put(host, info)
+		return respond(id, toolResult{Content: []contentBlock{{Type: "text", Text: info.JSON()}}})
+
 	case "get_output":
 		bufID, _ := params.Arguments["buf_id"].(string)
 		if bufID == "" {
@@ -680,6 +704,18 @@ func toolDefinitions() []toolDef {
 					},
 				},
 				"required": []string{"host", "commands"},
+			},
+		},
+		{
+			Name:        "host_info",
+			Description: "Fingerprint a remote host: OS, kernel, shell, package manager, and installed tools. Cached for 30 minutes. Use refresh: true to force re-probe.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"host":    map[string]any{"type": "string", "description": "Host name as defined in policy"},
+					"refresh": map[string]any{"type": "boolean", "description": "Force re-probe even if cached"},
+				},
+				"required": []string{"host"},
 			},
 		},
 		{
