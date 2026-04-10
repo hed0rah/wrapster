@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -13,6 +14,24 @@ import (
 
 	"github.com/hed0rah/wrapster/internal/runner"
 )
+
+// gzipSSEWriter wraps a gzip.Writer + ResponseWriter so that Flush() drains
+// the gzip compressor (BSYNC flush) before flushing the underlying HTTP layer.
+// This is required for SSE: each event must be immediately decodable by the client.
+type gzipSSEWriter struct {
+	gz *gzip.Writer
+	w  http.ResponseWriter
+	f  http.Flusher
+}
+
+func (g *gzipSSEWriter) Header() http.Header         { return g.w.Header() }
+func (g *gzipSSEWriter) Write(b []byte) (int, error) { return g.gz.Write(b) }
+func (g *gzipSSEWriter) WriteHeader(code int)        { g.w.WriteHeader(code) }
+
+func (g *gzipSSEWriter) Flush() {
+	g.gz.Flush() // sync flush -- compressor state survives, output decodable
+	g.f.Flush()  // push bytes to the client over HTTP
+}
 
 // SSEServer runs an MCP server over HTTP with Server-Sent Events transport.
 // Implements the legacy (2024-11-05) SSE spec: GET /sse for event stream,
@@ -65,6 +84,18 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wrap with gzip if the client supports it. Must happen before any header writes.
+	var fw http.Flusher = flusher
+	var ww http.ResponseWriter = w
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		gz, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+		defer gz.Close()
+		w.Header().Set("Content-Encoding", "gzip")
+		gw := &gzipSSEWriter{gz: gz, w: w, f: flusher}
+		ww = gw
+		fw = gw
+	}
+
 	sessionID := generateSessionID()
 	ctx, cancel := context.WithCancel(r.Context())
 
@@ -86,11 +117,11 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}()
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ww.Header().Set("Content-Type", "text/event-stream")
+	ww.Header().Set("Cache-Control", "no-cache")
+	ww.Header().Set("Connection", "keep-alive")
+	ww.Header().Set("X-Accel-Buffering", "no")
+	ww.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// Send endpoint event with full URL -- some clients require absolute URL.
 	scheme := "http"
@@ -99,14 +130,14 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		host = s.addr
 	}
 	endpointURL := fmt.Sprintf("%s://%s/message?sessionId=%s", scheme, host, sessionID)
-	fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpointURL)
-	flusher.Flush()
+	fmt.Fprintf(ww, "event: endpoint\ndata: %s\n\n", endpointURL)
+	fw.Flush()
 
 	for {
 		select {
 		case msg := <-sess.ch:
-			fmt.Fprintf(w, "event: message\ndata: %s\n\n", msg)
-			flusher.Flush()
+			fmt.Fprintf(ww, "event: message\ndata: %s\n\n", msg)
+			fw.Flush()
 		case <-ctx.Done():
 			return
 		}
