@@ -68,16 +68,46 @@ type initializeResult struct {
 }
 
 type capabilities struct {
-	Tools *toolsCap `json:"tools,omitempty"`
+	Tools      *toolsCap  `json:"tools,omitempty"`
+	Extensions *extensions `json:"extensions,omitempty"`
 }
 
 type toolsCap struct {
 	ListChanged bool `json:"listChanged"`
 }
 
+// extensions advertises wrapster-specific transport capabilities to the client.
+// Clients that don't understand this field will ignore it. Features guarded by
+// these flags should degrade gracefully when unsupported.
+type extensions struct {
+	// GzipSSE: SSE stream is gzip-compressed when client sends Accept-Encoding: gzip.
+	GzipSSE bool `json:"gzip_sse"`
+	// RequestCancellation: server honours notifications/cancelled to kill in-flight execs.
+	RequestCancellation bool `json:"request_cancellation"`
+	// ConcurrentDispatch: server can process multiple tool calls in parallel (stdio).
+	ConcurrentDispatch bool `json:"concurrent_dispatch"`
+	// OutputHandles: large outputs return a buf_id handle; use get_output to page them.
+	OutputHandles bool `json:"output_handles"`
+}
+
+// serverExtensions is the static extension capability set for this build.
+var serverExtensions = &extensions{
+	GzipSSE:             true,
+	RequestCancellation: true,
+	ConcurrentDispatch:  true,
+	OutputHandles:       false, // not yet implemented
+}
+
 type serverInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+}
+
+// initializeParams is the client-side initialize request body.
+type initializeParams struct {
+	ProtocolVersion string          `json:"protocolVersion"`
+	ClientInfo      *serverInfo     `json:"clientInfo,omitempty"`
+	Capabilities    json.RawMessage `json:"capabilities,omitempty"`
 }
 
 type toolsListResult struct {
@@ -110,9 +140,14 @@ type contentBlock struct {
 func handleMessage(r *runner.Runner, msg *jsonrpcMessage) *jsonrpcResponse {
 	switch msg.Method {
 	case "initialize":
+		// Parse client params for logging; we advertise the same extensions regardless.
+		var params initializeParams
+		if msg.Params != nil {
+			_ = json.Unmarshal(msg.Params, &params) // best-effort; ignore parse errors
+		}
 		return respond(msg.ID, initializeResult{
 			ProtocolVersion: "2024-11-05",
-			Capabilities:    capabilities{Tools: &toolsCap{}},
+			Capabilities:    capabilities{Tools: &toolsCap{}, Extensions: serverExtensions},
 			ServerInfo:      serverInfo{Name: "wrapster", Version: "0.1.0"},
 		})
 
