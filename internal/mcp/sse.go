@@ -44,10 +44,11 @@ type SSEServer struct {
 }
 
 type sseSession struct {
-	id     string
-	ch     chan []byte
-	ctx    context.Context
-	cancel context.CancelFunc
+	id      string
+	ch      chan []byte
+	ctx     context.Context
+	cancel  context.CancelFunc
+	cancels *cancelRegistry // in-flight tool call cancellations for this session
 }
 
 func NewSSEServer(r *runner.Runner, addr string) *SSEServer {
@@ -100,10 +101,11 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 
 	sess := &sseSession{
-		id:     sessionID,
-		ch:     make(chan []byte, 64),
-		ctx:    ctx,
-		cancel: cancel,
+		id:      sessionID,
+		ch:      make(chan []byte, 64),
+		ctx:     ctx,
+		cancel:  cancel,
+		cancels: newCancelRegistry(),
 	}
 
 	s.mu.Lock()
@@ -186,7 +188,7 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Handle in a goroutine; push response to the SSE stream.
 	go func() {
-		response := handleMessage(s.runner, msg)
+		response := handleMessage(s.runner, msg, sess.cancels)
 		if response != nil {
 			data, err := json.Marshal(response)
 			if err != nil {

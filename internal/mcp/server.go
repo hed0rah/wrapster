@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/hed0rah/wrapster/internal/output"
 	"github.com/hed0rah/wrapster/internal/policy"
@@ -18,6 +19,8 @@ import (
 func Serve(r *runner.Runner) error {
 	reader := bufio.NewReader(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
+	var encMu sync.Mutex
+	cr := newCancelRegistry()
 
 	for {
 		msg, err := readMessage(reader)
@@ -25,17 +28,73 @@ func Serve(r *runner.Runner) error {
 			return nil
 		}
 		if err != nil {
+			encMu.Lock()
 			writeError(encoder, nil, -32700, "parse error: "+err.Error())
+			encMu.Unlock()
 			continue
 		}
 
-		response := handleMessage(r, msg)
+		// notifications/cancelled: cancel an in-flight tool call by request ID.
+		// Note: in the current sequential stdio loop this can only cancel a
+		// future request (the in-flight one blocks here). With concurrent dispatch
+		// (feat/concurrent-dispatch) this becomes fully effective.
+		if msg.Method == "notifications/cancelled" {
+			var p struct {
+				RequestID any    `json:"requestId"`
+				Reason    string `json:"reason,omitempty"`
+			}
+			if msg.Params != nil {
+				_ = json.Unmarshal(msg.Params, &p)
+			}
+			if p.RequestID != nil {
+				cr.cancel(p.RequestID)
+			}
+			continue // notification, no response
+		}
+
+		response := handleMessage(r, msg, cr)
 		if response != nil {
+			encMu.Lock()
 			if err := encoder.Encode(response); err != nil {
 				fmt.Fprintf(os.Stderr, "mcp: write error: %v\n", err)
 			}
+			encMu.Unlock()
 		}
 	}
+}
+
+// cancelRegistry tracks cancellable contexts for in-flight tool calls.
+// Keyed by JSON-RPC request ID (any -- may be string, float64, or nil).
+// Safe for concurrent use by the read loop and goroutine-dispatched handlers.
+type cancelRegistry struct {
+	mu      sync.Mutex
+	cancels map[any]context.CancelFunc
+}
+
+func newCancelRegistry() *cancelRegistry {
+	return &cancelRegistry{cancels: make(map[any]context.CancelFunc)}
+}
+
+func (cr *cancelRegistry) register(id any, cancel context.CancelFunc) {
+	cr.mu.Lock()
+	cr.cancels[id] = cancel
+	cr.mu.Unlock()
+}
+
+func (cr *cancelRegistry) cancel(id any) bool {
+	cr.mu.Lock()
+	fn, ok := cr.cancels[id]
+	cr.mu.Unlock()
+	if ok {
+		fn()
+	}
+	return ok
+}
+
+func (cr *cancelRegistry) deregister(id any) {
+	cr.mu.Lock()
+	delete(cr.cancels, id)
+	cr.mu.Unlock()
 }
 
 // JSON-RPC types
@@ -137,7 +196,7 @@ type contentBlock struct {
 
 // Message handling
 
-func handleMessage(r *runner.Runner, msg *jsonrpcMessage) *jsonrpcResponse {
+func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry) *jsonrpcResponse {
 	switch msg.Method {
 	case "initialize":
 		// Parse client params for logging; we advertise the same extensions regardless.
@@ -162,7 +221,14 @@ func handleMessage(r *runner.Runner, msg *jsonrpcMessage) *jsonrpcResponse {
 		if err := json.Unmarshal(msg.Params, &params); err != nil {
 			return respondError(msg.ID, -32602, "invalid params: "+err.Error())
 		}
-		return handleToolCall(r, msg.ID, params)
+		// Create a cancellable context for this call and register it.
+		ctx, cancel := context.WithCancel(context.Background())
+		cr.register(msg.ID, cancel)
+		defer func() {
+			cancel()
+			cr.deregister(msg.ID)
+		}()
+		return handleToolCall(r, msg.ID, params, ctx)
 
 	case "ping":
 		return respond(msg.ID, map[string]any{})
@@ -173,7 +239,7 @@ func handleMessage(r *runner.Runner, msg *jsonrpcMessage) *jsonrpcResponse {
 	}
 }
 
-func handleToolCall(r *runner.Runner, id any, params callToolParams) *jsonrpcResponse {
+func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context.Context) *jsonrpcResponse {
 	switch params.Name {
 	case "exec":
 		command, _ := params.Arguments["command"].(string)
@@ -184,7 +250,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams) *jsonrpcRes
 			})
 		}
 
-		result := r.ExecLocal(context.Background(), command)
+		result := r.ExecLocal(ctx, command)
 		processOutput(r, &result)
 		out, _ := json.MarshalIndent(result, "", "  ")
 		return respond(id, toolResult{
@@ -202,7 +268,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams) *jsonrpcRes
 			})
 		}
 
-		result := r.Exec(context.Background(), host, command, nil)
+		result := r.Exec(ctx, host, command, nil)
 		processOutput(r, &result)
 		out, _ := json.MarshalIndent(result, "", "  ")
 		return respond(id, toolResult{
@@ -264,9 +330,9 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams) *jsonrpcRes
 
 		var br runner.BatchResult
 		if host == "local" {
-			br = r.BatchExecLocal(context.Background(), commands)
+			br = r.BatchExecLocal(ctx, commands)
 		} else {
-			br = r.BatchExec(context.Background(), host, commands, nil)
+			br = r.BatchExec(ctx, host, commands, nil)
 		}
 
 		// apply output processing to each result
