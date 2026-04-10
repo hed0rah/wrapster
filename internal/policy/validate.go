@@ -4,7 +4,25 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 )
+
+// compiledDeniedCache caches compiled denied_patterns regexes by pattern string.
+// Patterns are compiled once and reused across all calls, avoiding repeated
+// regexp.Compile overhead in ValidateCommand hot paths (especially batch_exec).
+var compiledDeniedCache sync.Map // key: string, value: *regexp.Regexp
+
+func cachedCompile(pat string) (*regexp.Regexp, error) {
+	if v, ok := compiledDeniedCache.Load(pat); ok {
+		return v.(*regexp.Regexp), nil
+	}
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		return nil, err
+	}
+	compiledDeniedCache.Store(pat, re)
+	return re, nil
+}
 
 // ValidationMode controls how commands are checked.
 type ValidationMode int
@@ -70,7 +88,7 @@ func ValidateCommand(cmd string, hp HostPolicy, mode ValidationMode) ValidationR
 
 	// User-defined denied patterns -- apply in both modes.
 	for _, pat := range hp.DeniedPatterns {
-		re, err := regexp.Compile(pat)
+		re, err := cachedCompile(pat)
 		if err != nil {
 			return ValidationResult{
 				Allowed: false,

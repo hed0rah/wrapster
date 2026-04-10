@@ -200,6 +200,12 @@ func LoadPolicy(path string) (*Policy, error) {
 			return nil, fmt.Errorf("in local: %w", err)
 		}
 	}
+	// Validate local denied_patterns.
+	for _, pat := range p.Local.DeniedPatterns {
+		if _, err := regexp.Compile(pat); err != nil {
+			return nil, fmt.Errorf("in local.denied_patterns: bad pattern %q: %w", pat, err)
+		}
+	}
 
 	// Default local mode.
 	if p.Local.Mode == "" {
@@ -231,6 +237,12 @@ func compileRules(hp *HostPolicy) error {
 	for i := range hp.AllowedCommands {
 		if err := hp.AllowedCommands[i].Compile(); err != nil {
 			return err
+		}
+	}
+	// Validate denied_patterns at load time so bad regex fails fast.
+	for _, pat := range hp.DeniedPatterns {
+		if _, err := regexp.Compile(pat); err != nil {
+			return fmt.Errorf("bad denied_pattern %q: %w", pat, err)
 		}
 	}
 	return nil
