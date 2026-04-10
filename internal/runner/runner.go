@@ -329,6 +329,17 @@ func (r *Runner) ListAllowed(host string) policy.HostPolicy {
 	return r.Policy.ResolvedPolicy(host)
 }
 
+// ExecRawLocal runs a command on the local machine without policy validation.
+// Intended for internal use (e.g. find_files, grep_files tools) where the
+// caller constructs the command from sanitized inputs.
+func (r *Runner) ExecRawLocal(ctx context.Context, command string) (string, string, error) {
+	result, err := execLocal(ctx, command, r.Policy.Local)
+	if err != nil {
+		return "", "", err
+	}
+	return result.Stdout, result.Stderr, nil
+}
+
 // ExecRaw runs a command on a host and returns (stdout, stderr, error) without
 // policy validation. Intended for internal probing (e.g. host_info fingerprinting)
 // where the caller is responsible for constructing safe commands.
