@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hed0rah/wrapster/internal/audit"
+	"github.com/hed0rah/wrapster/internal/cache"
 	"github.com/hed0rah/wrapster/internal/filter"
 	"github.com/hed0rah/wrapster/internal/output"
 	"github.com/hed0rah/wrapster/internal/policy"
@@ -24,6 +25,9 @@ type RunResult struct {
 	DurationMs int64            `json:"duration_ms,omitempty"`
 	Error      string           `json:"error,omitempty"`
 	Findings   []filter.Finding `json:"findings,omitempty"`
+	// Cached is true when this result was served from the result cache.
+	Cached    bool   `json:"cached,omitempty"`
+	CacheHash string `json:"cache_hash,omitempty"`
 }
 
 // Runner holds shared state for executing validated commands.
@@ -32,6 +36,7 @@ type Runner struct {
 	Logger       *audit.Logger
 	Filters      *filter.Chain
 	OutputStats  *output.Tracker
+	ResultCache  *cache.ResultCache
 }
 
 // OutputConfig returns the output processing config from the policy.

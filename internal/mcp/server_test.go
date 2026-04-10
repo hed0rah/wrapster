@@ -105,8 +105,8 @@ func TestToolsList(t *testing.T) {
 	var result toolsListResult
 	json.Unmarshal(b, &result)
 
-	if len(result.Tools) != 6 {
-		t.Fatalf("expected 6 tools, got %d", len(result.Tools))
+	if len(result.Tools) != 7 {
+		t.Fatalf("expected 7 tools, got %d", len(result.Tools))
 	}
 
 	names := map[string]bool{}

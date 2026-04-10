@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/hed0rah/wrapster/internal/audit"
+	"github.com/hed0rah/wrapster/internal/cache"
 	"github.com/hed0rah/wrapster/internal/output"
 	"github.com/hed0rah/wrapster/internal/policy"
 	"github.com/hed0rah/wrapster/internal/runner"
@@ -262,6 +264,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 	switch params.Name {
 	case "exec":
 		command, _ := params.Arguments["command"].(string)
+		nocache, _ := params.Arguments["nocache"].(bool)
 		if command == "" {
 			return respond(id, toolResult{
 				IsError: true,
@@ -269,8 +272,16 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			})
 		}
 
+		if !nocache && r.ResultCache != nil {
+			if hit := r.ResultCache.Get("local", command); hit != nil {
+				return respond(id, toolResult{
+					Content: []contentBlock{{Type: "text", Text: formatCacheHit(hit)}},
+				})
+			}
+		}
 		result := r.ExecLocal(ctx, command)
 		processOutput(r, &result)
+		cacheResult(r, "local", command, &result)
 		out, _ := json.MarshalIndent(result, "", "  ")
 		return respond(id, toolResult{
 			IsError: !result.Allowed || result.Error != "",
@@ -280,6 +291,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 	case "ssh_exec":
 		host, _ := params.Arguments["host"].(string)
 		command, _ := params.Arguments["command"].(string)
+		nocache, _ := params.Arguments["nocache"].(bool)
 		if host == "" || command == "" {
 			return respond(id, toolResult{
 				IsError: true,
@@ -287,8 +299,16 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			})
 		}
 
+		if !nocache && r.ResultCache != nil {
+			if hit := r.ResultCache.Get(host, command); hit != nil {
+				return respond(id, toolResult{
+					Content: []contentBlock{{Type: "text", Text: formatCacheHit(hit)}},
+				})
+			}
+		}
 		result := r.Exec(ctx, host, command, nil)
 		processOutput(r, &result)
+		cacheResult(r, host, command, &result)
 		out, _ := json.MarshalIndent(result, "", "  ")
 		return respond(id, toolResult{
 			IsError: !result.Allowed || result.Error != "",
@@ -366,6 +386,25 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			Content: []contentBlock{{Type: "text", Text: string(out)}},
 		})
 
+	case "cache_invalidate":
+		if r.ResultCache == nil {
+			return respond(id, toolResult{
+				Content: []contentBlock{{Type: "text", Text: "result cache not enabled"}},
+			})
+		}
+		host, _ := params.Arguments["host"].(string)
+		command, _ := params.Arguments["command"].(string)
+		if host == "" && command == "" {
+			r.ResultCache.Flush()
+			return respond(id, toolResult{
+				Content: []contentBlock{{Type: "text", Text: "cache flushed"}},
+			})
+		}
+		r.ResultCache.Invalidate(host, command)
+		return respond(id, toolResult{
+			Content: []contentBlock{{Type: "text", Text: fmt.Sprintf("invalidated: %s %s", host, command)}},
+		})
+
 	case "get_stats":
 		if r.OutputStats == nil {
 			return respond(id, toolResult{
@@ -389,6 +428,34 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			Content: []contentBlock{{Type: "text", Text: "unknown tool: " + params.Name}},
 		})
 	}
+}
+
+// cacheResult stores a successful exec result in the ResultCache.
+func cacheResult(r *runner.Runner, host, command string, result *runner.RunResult) {
+	if r.ResultCache == nil || !result.Allowed || result.Error != "" || result.TimedOut {
+		return
+	}
+	r.ResultCache.Put(host, command, &cache.Entry{
+		Hash:     audit.HashOutput(result.Stdout, result.Stderr),
+		Stdout:   result.Stdout,
+		Stderr:   result.Stderr,
+		ExitCode: result.ExitCode,
+	})
+}
+
+// formatCacheHit formats a cache hit response for the model.
+func formatCacheHit(e *cache.Entry) string {
+	r := runner.RunResult{
+		Allowed:   true,
+		Reason:    "served from result cache",
+		Stdout:    e.Stdout,
+		Stderr:    e.Stderr,
+		ExitCode:  e.ExitCode,
+		Cached:    true,
+		CacheHash: e.Hash,
+	}
+	out, _ := json.MarshalIndent(r, "", "  ")
+	return string(out)
 }
 
 // processOutput applies ANSI stripping and truncation to stdout/stderr.
@@ -425,6 +492,10 @@ func toolDefinitions() []toolDef {
 						"type":        "string",
 						"description": "Shell command to execute locally",
 					},
+					"nocache": map[string]any{
+						"type":        "boolean",
+						"description": "Bypass result cache and force re-execution",
+					},
 				},
 				"required": []string{"command"},
 			},
@@ -442,6 +513,10 @@ func toolDefinitions() []toolDef {
 					"command": map[string]any{
 						"type":        "string",
 						"description": "Command to execute on the remote host",
+					},
+					"nocache": map[string]any{
+						"type":        "boolean",
+						"description": "Bypass result cache and force re-execution",
 					},
 				},
 				"required": []string{"host", "command"},
@@ -496,6 +571,23 @@ func toolDefinitions() []toolDef {
 					},
 				},
 				"required": []string{"host", "commands"},
+			},
+		},
+		{
+			Name:        "cache_invalidate",
+			Description: "Invalidate a specific result cache entry or flush the entire cache. Omit host and command to flush everything.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"host": map[string]any{
+						"type":        "string",
+						"description": "Host name of the entry to invalidate",
+					},
+					"command": map[string]any{
+						"type":        "string",
+						"description": "Command string of the entry to invalidate",
+					},
+				},
 			},
 		},
 		{

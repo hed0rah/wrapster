@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hed0rah/wrapster/internal/audit"
+	"github.com/hed0rah/wrapster/internal/cache"
 	"github.com/hed0rah/wrapster/internal/filter"
 	"github.com/hed0rah/wrapster/internal/mcp"
 	"github.com/hed0rah/wrapster/internal/output"
@@ -93,7 +94,13 @@ func main() {
 		fatal("filters", err)
 	}
 
-	r := &runner.Runner{Policy: pol, Logger: logger, Filters: chain, OutputStats: &output.Tracker{}}
+	r := &runner.Runner{
+		Policy:      pol,
+		Logger:      logger,
+		Filters:     chain,
+		OutputStats: &output.Tracker{},
+		ResultCache: cache.New(30 * time.Second),
+	}
 
 	// --mcp mode (stdio)
 	if cfg.mcpMode {
