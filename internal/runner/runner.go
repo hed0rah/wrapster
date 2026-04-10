@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hed0rah/wrapster/internal/audit"
+	"github.com/hed0rah/wrapster/internal/bufstore"
 	"github.com/hed0rah/wrapster/internal/cache"
 	"github.com/hed0rah/wrapster/internal/filter"
 	"github.com/hed0rah/wrapster/internal/output"
@@ -37,6 +38,7 @@ type Runner struct {
 	Filters      *filter.Chain
 	OutputStats  *output.Tracker
 	ResultCache  *cache.ResultCache
+	BufStore     *bufstore.Store
 }
 
 // OutputConfig returns the output processing config from the policy.

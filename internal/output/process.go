@@ -78,6 +78,12 @@ func (s Stats) SavingsPct() float64 {
 // and simple two-byte escapes.
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b[=><78HMND]`)
 
+// StripANSI removes ANSI escape sequences from s without applying any other
+// transformations. Exported for use by the buf-store layer.
+func StripANSI(s string) string {
+	return ansiPattern.ReplaceAllString(s, "")
+}
+
 // Process applies configured transformations to raw command output.
 // Returns the processed string.
 func Process(raw string, cfg Config) string {

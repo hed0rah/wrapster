@@ -175,7 +175,7 @@ var serverExtensions = &extensions{
 	GzipSSE:             true,
 	RequestCancellation: true,
 	ConcurrentDispatch:  true,
-	OutputHandles:       false, // not yet implemented
+	OutputHandles:       true,
 }
 
 type serverInfo struct {
@@ -280,9 +280,13 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			}
 		}
 		result := r.ExecLocal(ctx, command)
-		processOutput(r, &result)
+		bufID, truncated := processOutputWithBuf(r, &result)
 		cacheResult(r, "local", command, &result)
-		out, _ := json.MarshalIndent(result, "", "  ")
+		resp := execResponse{RunResult: result, BufID: bufID, Truncated: truncated}
+		if bufID != "" {
+			resp.BufBytes = r.BufStore.Len(bufID)
+		}
+		out, _ := json.MarshalIndent(resp, "", "  ")
 		return respond(id, toolResult{
 			IsError: !result.Allowed || result.Error != "",
 			Content: []contentBlock{{Type: "text", Text: string(out)}},
@@ -307,9 +311,13 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			}
 		}
 		result := r.Exec(ctx, host, command, nil)
-		processOutput(r, &result)
+		bufID, truncated := processOutputWithBuf(r, &result)
 		cacheResult(r, host, command, &result)
-		out, _ := json.MarshalIndent(result, "", "  ")
+		resp := execResponse{RunResult: result, BufID: bufID, Truncated: truncated}
+		if bufID != "" {
+			resp.BufBytes = r.BufStore.Len(bufID)
+		}
+		out, _ := json.MarshalIndent(resp, "", "  ")
 		return respond(id, toolResult{
 			IsError: !result.Allowed || result.Error != "",
 			Content: []contentBlock{{Type: "text", Text: string(out)}},
@@ -386,6 +394,56 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			Content: []contentBlock{{Type: "text", Text: string(out)}},
 		})
 
+	case "get_output":
+		bufID, _ := params.Arguments["buf_id"].(string)
+		if bufID == "" {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "buf_id is required"}}})
+		}
+		if r.BufStore == nil {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "output buffer not enabled"}}})
+		}
+		offset := 0
+		length := 8192
+		if v, ok := params.Arguments["offset"].(float64); ok {
+			offset = int(v)
+		}
+		if v, ok := params.Arguments["length"].(float64); ok {
+			length = int(v)
+		}
+		slice := r.BufStore.Slice(bufID, offset, length)
+		if slice == "" && r.BufStore.Len(bufID) == 0 {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: fmt.Sprintf("buf_id %q not found", bufID)}}})
+		}
+		total := r.BufStore.Len(bufID)
+		header := fmt.Sprintf("// buf_id=%s offset=%d length=%d total=%d\n", bufID, offset, len(slice), total)
+		return respond(id, toolResult{
+			Content: []contentBlock{{Type: "text", Text: header + slice}},
+		})
+
+	case "grep_output":
+		bufID, _ := params.Arguments["buf_id"].(string)
+		pattern, _ := params.Arguments["pattern"].(string)
+		if bufID == "" || pattern == "" {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "buf_id and pattern are required"}}})
+		}
+		if r.BufStore == nil {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "output buffer not enabled"}}})
+		}
+		maxLines := 100
+		if v, ok := params.Arguments["max_lines"].(float64); ok {
+			maxLines = int(v)
+		}
+		lines, err := r.BufStore.Grep(bufID, pattern, maxLines)
+		if err != nil {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: err.Error()}}})
+		}
+		if len(lines) == 0 {
+			return respond(id, toolResult{Content: []contentBlock{{Type: "text", Text: "(no matches)"}}})
+		}
+		return respond(id, toolResult{
+			Content: []contentBlock{{Type: "text", Text: strings.Join(lines, "\n")}},
+		})
+
 	case "cache_invalidate":
 		if r.ResultCache == nil {
 			return respond(id, toolResult{
@@ -428,6 +486,57 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			Content: []contentBlock{{Type: "text", Text: "unknown tool: " + params.Name}},
 		})
 	}
+}
+
+// execResponse wraps RunResult with output-handle metadata added by the server layer.
+type execResponse struct {
+	runner.RunResult
+	BufID     string `json:"buf_id,omitempty"`
+	BufBytes  int    `json:"buf_bytes,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+// processOutputWithBuf applies output processing and, if output was truncated,
+// stores the full content in the BufStore and returns the handle.
+func processOutputWithBuf(r *runner.Runner, result *runner.RunResult) (bufID string, truncated bool) {
+	if !result.Allowed || (result.Stdout == "" && result.Stderr == "") {
+		return "", false
+	}
+
+	cfg := r.OutputConfig()
+	rawLen := len(result.Stdout) + len(result.Stderr)
+
+	// Store full (ANSI-stripped, pre-truncation) output for the buf handle.
+	fullOut := result.Stdout
+	fullErr := result.Stderr
+	if cfg.ANSIStrip {
+		fullOut = output.StripANSI(fullOut)
+		fullErr = output.StripANSI(fullErr)
+	}
+
+	if result.Stdout != "" {
+		result.Stdout = output.Process(result.Stdout, cfg)
+	}
+	if result.Stderr != "" {
+		result.Stderr = output.Process(result.Stderr, cfg)
+	}
+
+	outLen := len(result.Stdout) + len(result.Stderr)
+	if r.OutputStats != nil {
+		r.OutputStats.Record(rawLen, outLen)
+	}
+
+	// If truncation happened and we have a BufStore, stash the full content.
+	fullLen := len(fullOut) + len(fullErr)
+	if fullLen > outLen && r.BufStore != nil {
+		combined := fullOut
+		if fullErr != "" {
+			combined += "\n--- stderr ---\n" + fullErr
+		}
+		bufID = r.BufStore.Put(combined)
+		truncated = true
+	}
+	return bufID, truncated
 }
 
 // cacheResult stores a successful exec result in the ResultCache.
@@ -571,6 +680,32 @@ func toolDefinitions() []toolDef {
 					},
 				},
 				"required": []string{"host", "commands"},
+			},
+		},
+		{
+			Name:        "get_output",
+			Description: "Read a slice of full command output from a buffer handle. When exec or ssh_exec returns a buf_id, use this to page through the untruncated content.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"buf_id": map[string]any{"type": "string", "description": "Handle returned by exec/ssh_exec"},
+					"offset": map[string]any{"type": "integer", "description": "Byte offset (default 0)"},
+					"length": map[string]any{"type": "integer", "description": "Max bytes to return (default 8192)"},
+				},
+				"required": []string{"buf_id"},
+			},
+		},
+		{
+			Name:        "grep_output",
+			Description: "Search a buffered command output for lines matching a regex. Returns matching lines without loading the full output.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"buf_id":    map[string]any{"type": "string", "description": "Handle returned by exec/ssh_exec"},
+					"pattern":   map[string]any{"type": "string", "description": "Regex to match against each line"},
+					"max_lines": map[string]any{"type": "integer", "description": "Max matching lines to return (default 100)"},
+				},
+				"required": []string{"buf_id", "pattern"},
 			},
 		},
 		{
