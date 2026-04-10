@@ -35,9 +35,9 @@ func Serve(r *runner.Runner) error {
 		}
 
 		// notifications/cancelled: cancel an in-flight tool call by request ID.
-		// Note: in the current sequential stdio loop this can only cancel a
-		// future request (the in-flight one blocks here). With concurrent dispatch
-		// (feat/concurrent-dispatch) this becomes fully effective.
+		// With concurrent dispatch below, this arrives on the read loop while
+		// the tool call goroutine is still running -- the cancel propagates
+		// immediately to exec.CommandContext.
 		if msg.Method == "notifications/cancelled" {
 			var p struct {
 				RequestID any    `json:"requestId"`
@@ -52,6 +52,25 @@ func Serve(r *runner.Runner) error {
 			continue // notification, no response
 		}
 
+		// Dispatch tools/call concurrently so the read loop stays unblocked
+		// and can process notifications/cancelled while execs are running.
+		// Multiple tool calls (e.g. to different SSH hosts) execute in parallel.
+		if msg.Method == "tools/call" {
+			go func(m *jsonrpcMessage) {
+				response := handleMessage(r, m, cr)
+				if response != nil {
+					encMu.Lock()
+					if err := encoder.Encode(response); err != nil {
+						fmt.Fprintf(os.Stderr, "mcp: write error: %v\n", err)
+					}
+					encMu.Unlock()
+				}
+			}(msg)
+			continue
+		}
+
+		// Non-tool-call requests (initialize, tools/list, ping) are fast;
+		// handle synchronously so they don't race with concurrent tool calls.
 		response := handleMessage(r, msg, cr)
 		if response != nil {
 			encMu.Lock()

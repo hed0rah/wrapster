@@ -71,7 +71,7 @@ func sendRPC(t *testing.T, r *runner.Runner, method string, params any) *jsonrpc
 		Method:  method,
 		Params:  paramsJSON,
 	}
-	return handleMessage(r, msg)
+	return handleMessage(r, msg, newCancelRegistry())
 }
 
 func TestInitialize(t *testing.T) {
