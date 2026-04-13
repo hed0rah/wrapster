@@ -197,9 +197,21 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 	// Return 202 immediately per spec.
 	w.WriteHeader(http.StatusAccepted)
 
+	// notify pushes a JSON-RPC notification to the SSE stream.
+	notify := notifyFunc(func(method string, params any) {
+		data, err := json.Marshal(jsonrpcNotification{JSONRPC: "2.0", Method: method, Params: params})
+		if err != nil {
+			return
+		}
+		select {
+		case sess.ch <- data:
+		case <-sess.ctx.Done():
+		}
+	})
+
 	// Handle in a goroutine; push response to the SSE stream.
 	go func() {
-		response := handleMessage(s.runner, msg, sess.cancels, sess.state)
+		response := handleMessage(s.runner, msg, sess.cancels, sess.state, notify)
 		if response != nil {
 			data, err := json.Marshal(response)
 			if err != nil {

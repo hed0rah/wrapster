@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/hed0rah/wrapster/internal/audit"
 	"github.com/hed0rah/wrapster/internal/cache"
@@ -18,6 +19,10 @@ import (
 	"github.com/hed0rah/wrapster/internal/policy"
 	"github.com/hed0rah/wrapster/internal/runner"
 )
+
+// notifyFunc sends a JSON-RPC notification to the client. Used by tool handlers
+// to emit progress updates mid-flight. Must be safe for concurrent use.
+type notifyFunc func(method string, params any)
 
 // connState tracks the MCP connection lifecycle.
 // CONNECTED -> INITIALIZING -> READY
@@ -78,6 +83,14 @@ func Serve(r *runner.Runner) error {
 		encMu.Unlock()
 	}
 
+	// notify emits a JSON-RPC notification (no ID) through the same
+	// serialized write path as responses. Used for progress updates.
+	notify := notifyFunc(func(method string, params any) {
+		encMu.Lock()
+		encoder.Encode(jsonrpcNotification{JSONRPC: "2.0", Method: method, Params: params})
+		encMu.Unlock()
+	})
+
 	for {
 		msg, err := readMessage(reader)
 		if err == io.EOF {
@@ -119,14 +132,14 @@ func Serve(r *runner.Runner) error {
 		// Multiple tool calls (e.g. to different SSH hosts) execute in parallel.
 		if msg.Method == "tools/call" {
 			go func(m *jsonrpcMessage) {
-				send(handleMessage(r, m, cr, cs))
+				send(handleMessage(r, m, cr, cs, notify))
 			}(msg)
 			continue
 		}
 
 		// Non-tool-call requests (initialize, tools/list, ping) are fast;
 		// handle synchronously so they don't race with concurrent tool calls.
-		send(handleMessage(r, msg, cr, cs))
+		send(handleMessage(r, msg, cr, cs, notify))
 	}
 }
 
@@ -283,6 +296,66 @@ func boolPtr(b bool) *bool { return &b }
 type callToolParams struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
+	Meta      *callMeta      `json:"_meta,omitempty"`
+}
+
+type callMeta struct {
+	ProgressToken any `json:"progressToken,omitempty"`
+}
+
+// progressNotification is the params shape for notifications/progress.
+type progressNotification struct {
+	ProgressToken any   `json:"progressToken"`
+	Progress      int64 `json:"progress"`
+	Message       string `json:"message,omitempty"`
+}
+
+// jsonrpcNotification is a JSON-RPC notification (no ID, no response expected).
+type jsonrpcNotification struct {
+	JSONRPC string `json:"jsonrpc"`
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
+}
+
+// startProgress begins emitting notifications/progress every 2s for the given
+// context. Returns immediately. The first emission is delayed 1s to skip
+// sub-second calls. Stops when ctx is done. Never call after the tool result
+// is sent -- cancel ctx first.
+func startProgress(ctx context.Context, token any, notify notifyFunc) {
+	if token == nil || notify == nil {
+		return
+	}
+	go func() {
+		start := time.Now()
+		// delay first emission 1s to skip sub-second calls
+		select {
+		case <-time.After(1 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		// emit first progress immediately after the 1s gate
+		elapsed := time.Since(start).Milliseconds()
+		notify("notifications/progress", progressNotification{
+			ProgressToken: token,
+			Progress:      elapsed,
+			Message:       fmt.Sprintf("running (%0.1fs elapsed)", float64(elapsed)/1000),
+		})
+		for {
+			select {
+			case <-ticker.C:
+				elapsed = time.Since(start).Milliseconds()
+				notify("notifications/progress", progressNotification{
+					ProgressToken: token,
+					Progress:      elapsed,
+					Message:       fmt.Sprintf("running (%0.1fs elapsed)", float64(elapsed)/1000),
+				})
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 type toolResult struct {
@@ -297,7 +370,7 @@ type contentBlock struct {
 
 // Message handling
 
-func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry, cs *connState) *jsonrpcResponse {
+func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry, cs *connState, notify notifyFunc) *jsonrpcResponse {
 	switch msg.Method {
 	case "initialize":
 		var params initializeParams
@@ -329,9 +402,13 @@ func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry, cs
 		ctx, cancel := context.WithCancel(context.Background())
 		cr.register(msg.ID, cancel)
 		defer func() {
-			cancel()
+			cancel() // also stops any progress ticker
 			cr.deregister(msg.ID)
 		}()
+		// Start progress notifications if client sent a progressToken.
+		if params.Meta != nil && params.Meta.ProgressToken != nil {
+			startProgress(ctx, params.Meta.ProgressToken, notify)
+		}
 		return handleToolCall(r, msg.ID, params, ctx)
 
 	case "ping":

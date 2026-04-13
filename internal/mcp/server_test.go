@@ -3,11 +3,14 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/hed0rah/wrapster/internal/audit"
 	"github.com/hed0rah/wrapster/internal/output"
@@ -79,7 +82,8 @@ func sendRPC(t *testing.T, r *runner.Runner, method string, params any) *jsonrpc
 		Method:  method,
 		Params:  paramsJSON,
 	}
-	return handleMessage(r, msg, newCancelRegistry(), readyState())
+	noop := notifyFunc(func(string, any) {})
+	return handleMessage(r, msg, newCancelRegistry(), readyState(), noop)
 }
 
 func TestInitialize(t *testing.T) {
@@ -332,6 +336,72 @@ func TestStateMachineGating(t *testing.T) {
 	msg = &jsonrpcMessage{JSONRPC: "2.0", ID: 5, Method: "tools/list"}
 	if reject = gateMethod(cs, msg); reject != nil {
 		t.Fatal("tools/list should be allowed in ready state")
+	}
+}
+
+func TestProgressNotifications(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var received []progressNotification
+
+	notify := notifyFunc(func(method string, params any) {
+		if method == "notifications/progress" {
+			if p, ok := params.(progressNotification); ok {
+				mu.Lock()
+				received = append(received, p)
+				mu.Unlock()
+			}
+		}
+	})
+
+	token := "test-token-123"
+	startProgress(ctx, token, notify)
+
+	// wait ~2.5s to get the first emission (1s gate + first immediate + possibly a tick)
+	time.Sleep(2500 * time.Millisecond)
+	cancel()
+
+	// small grace for goroutine cleanup
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	count := len(received)
+	mu.Unlock()
+
+	if count == 0 {
+		t.Fatal("expected at least one progress notification")
+	}
+
+	mu.Lock()
+	first := received[0]
+	mu.Unlock()
+
+	if first.ProgressToken != token {
+		t.Errorf("progressToken = %v, want %q", first.ProgressToken, token)
+	}
+	if first.Progress <= 0 {
+		t.Error("expected progress > 0")
+	}
+	if first.Message == "" {
+		t.Error("expected non-empty message")
+	}
+}
+
+func TestProgressSkipsNilToken(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	called := false
+	notify := notifyFunc(func(string, any) { called = true })
+
+	startProgress(ctx, nil, notify)
+	time.Sleep(1500 * time.Millisecond)
+	cancel()
+
+	if called {
+		t.Error("should not emit progress when token is nil")
 	}
 }
 
