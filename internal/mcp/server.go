@@ -242,10 +242,21 @@ type initializeResult struct {
 
 type capabilities struct {
 	Tools        *toolsCap      `json:"tools,omitempty"`
+	Resources    *resourcesCap  `json:"resources,omitempty"`
+	Prompts      *promptsCap    `json:"prompts,omitempty"`
 	Experimental map[string]any `json:"experimental,omitempty"`
 }
 
 type toolsCap struct {
+	ListChanged bool `json:"listChanged"`
+}
+
+type resourcesCap struct {
+	Subscribe   bool `json:"subscribe"`
+	ListChanged bool `json:"listChanged"`
+}
+
+type promptsCap struct {
 	ListChanged bool `json:"listChanged"`
 }
 
@@ -272,6 +283,41 @@ type initializeParams struct {
 
 type toolsListResult struct {
 	Tools []toolDef `json:"tools"`
+}
+
+// --- Resource types ---
+
+type resourcesListResult struct {
+	Resources         []resourceDef    `json:"resources"`
+	ResourceTemplates []resourceTmplDef `json:"resourceTemplates,omitempty"`
+}
+
+type resourceDef struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+type resourceTmplDef struct {
+	URITemplate string `json:"uriTemplate"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+type resourcesReadParams struct {
+	URI string `json:"uri"`
+}
+
+type resourcesReadResult struct {
+	Contents []resourceContent `json:"contents"`
+}
+
+type resourceContent struct {
+	URI      string `json:"uri"`
+	MimeType string `json:"mimeType,omitempty"`
+	Text     string `json:"text,omitempty"`
 }
 
 type toolDef struct {
@@ -364,8 +410,16 @@ type toolResult struct {
 }
 
 type contentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type     string       `json:"type"`
+	Text     string       `json:"text,omitempty"`
+	Resource *resourceRef `json:"resource,omitempty"`
+}
+
+// resourceRef is an embedded resource reference inside a tool result content block.
+type resourceRef struct {
+	URI      string `json:"uri"`
+	MimeType string `json:"mimeType,omitempty"`
+	Text     string `json:"text,omitempty"`
 }
 
 // Message handling
@@ -382,6 +436,8 @@ func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry, cs
 			ProtocolVersion: version,
 			Capabilities: capabilities{
 				Tools:        &toolsCap{},
+				Resources:    &resourcesCap{},
+				Prompts:      &promptsCap{},
 				Experimental: map[string]any{"wrapster": wrapsterExperimental},
 			},
 			ServerInfo: serverInfo{Name: "wrapster", Version: Version},
@@ -392,6 +448,40 @@ func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry, cs
 
 	case "tools/list":
 		return respond(msg.ID, toolsListResult{Tools: toolDefinitions()})
+
+	case "resources/list":
+		return respond(msg.ID, resourcesList(r))
+
+	case "resources/read":
+		var params resourcesReadParams
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			return respondError(msg.ID, -32602, "invalid params: "+err.Error())
+		}
+		if params.URI == "" {
+			return respondError(msg.ID, -32602, "uri is required")
+		}
+		result, err := resourcesRead(r, params.URI)
+		if err != nil {
+			return respondError(msg.ID, -32002, err.Error())
+		}
+		return respond(msg.ID, result)
+
+	case "prompts/list":
+		return respond(msg.ID, promptsListResult{Prompts: promptDefinitions()})
+
+	case "prompts/get":
+		var params promptsGetParams
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			return respondError(msg.ID, -32602, "invalid params: "+err.Error())
+		}
+		if params.Name == "" {
+			return respondError(msg.ID, -32602, "name is required")
+		}
+		result, err := getPrompt(params)
+		if err != nil {
+			return respondError(msg.ID, -32602, err.Error())
+		}
+		return respond(msg.ID, result)
 
 	case "tools/call":
 		var params callToolParams
@@ -439,15 +529,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		result := r.ExecLocal(ctx, command)
 		bufID, truncated := processOutputWithBuf(r, &result)
 		cacheResult(r, "local", command, &result)
-		resp := execResponse{RunResult: result, BufID: bufID, Truncated: truncated}
-		if bufID != "" {
-			resp.BufBytes = r.BufStore.Len(bufID)
-		}
-		out, _ := json.MarshalIndent(resp, "", "  ")
-		return respond(id, toolResult{
-			IsError: !result.Allowed || result.Error != "",
-			Content: []contentBlock{{Type: "text", Text: string(out)}},
-		})
+		return respond(id, buildExecToolResult(r, result, bufID, truncated))
 
 	case "ssh_exec":
 		host, _ := params.Arguments["host"].(string)
@@ -467,15 +549,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		result := r.Exec(ctx, host, command, nil)
 		bufID, truncated := processOutputWithBuf(r, &result)
 		cacheResult(r, host, command, &result)
-		resp := execResponse{RunResult: result, BufID: bufID, Truncated: truncated}
-		if bufID != "" {
-			resp.BufBytes = r.BufStore.Len(bufID)
-		}
-		out, _ := json.MarshalIndent(resp, "", "  ")
-		return respond(id, toolResult{
-			IsError: !result.Allowed || result.Error != "",
-			Content: []contentBlock{{Type: "text", Text: string(out)}},
-		})
+		return respond(id, buildExecToolResult(r, result, bufID, truncated))
 
 	case "ssh_validate":
 		host, _ := params.Arguments["host"].(string)
@@ -485,21 +559,9 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		}
 
 		result := r.Validate(host, command)
-		out, _ := json.MarshalIndent(result, "", "  ")
+		out, _ := json.Marshal(result)
 		return respond(id, toolResult{
 			Content: []contentBlock{{Type: "text", Text: string(out)}},
-		})
-
-	case "ssh_list_allowed":
-		host, _ := params.Arguments["host"].(string)
-		if host == "" {
-			return respondError(id, -32602, "host is required")
-		}
-
-		hp := r.ListAllowed(host)
-		text := formatAllowed(host, hp)
-		return respond(id, toolResult{
-			Content: []contentBlock{{Type: "text", Text: text}},
 		})
 
 	case "batch_exec":
@@ -529,7 +591,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			processOutput(r, &br.Results[i])
 		}
 
-		out, _ := json.MarshalIndent(br, "", "  ")
+		out, _ := json.Marshal(br)
 		hasError := br.Failed > 0 || br.Blocked > 0
 		return respond(id, toolResult{
 			IsError: hasError,
@@ -558,32 +620,6 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		}
 		r.HostInfoCache.Put(host, info)
 		return respond(id, toolResult{Content: []contentBlock{{Type: "text", Text: info.JSON()}}})
-
-	case "get_output":
-		bufID, _ := params.Arguments["buf_id"].(string)
-		if bufID == "" {
-			return respondError(id, -32602, "buf_id is required")
-		}
-		if r.BufStore == nil {
-			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "output buffer not enabled"}}})
-		}
-		offset := 0
-		length := 8192
-		if v, ok := params.Arguments["offset"].(float64); ok {
-			offset = int(v)
-		}
-		if v, ok := params.Arguments["length"].(float64); ok {
-			length = int(v)
-		}
-		slice := r.BufStore.Slice(bufID, offset, length)
-		if slice == "" && r.BufStore.Len(bufID) == 0 {
-			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: fmt.Sprintf("buf_id %q not found", bufID)}}})
-		}
-		total := r.BufStore.Len(bufID)
-		header := fmt.Sprintf("// buf_id=%s offset=%d length=%d total=%d\n", bufID, offset, len(slice), total)
-		return respond(id, toolResult{
-			Content: []contentBlock{{Type: "text", Text: header + slice}},
-		})
 
 	case "grep_output":
 		bufID, _ := params.Arguments["buf_id"].(string)
@@ -697,23 +733,6 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		}
 		return respond(id, toolResult{Content: []contentBlock{{Type: "text", Text: out}}})
 
-	case "get_stats":
-		if r.OutputStats == nil {
-			return respond(id, toolResult{
-				Content: []contentBlock{{Type: "text", Text: "output stats not enabled"}},
-			})
-		}
-		s := r.OutputStats.Snapshot()
-		out, _ := json.MarshalIndent(map[string]any{
-			"calls":       s.Calls,
-			"raw_bytes":   s.RawBytes,
-			"output_bytes": s.OutBytes,
-			"savings_pct": fmt.Sprintf("%.1f", s.SavingsPct()),
-		}, "", "  ")
-		return respond(id, toolResult{
-			Content: []contentBlock{{Type: "text", Text: string(out)}},
-		})
-
 	default:
 		return respond(id, toolResult{
 			IsError: true,
@@ -773,6 +792,35 @@ func processOutputWithBuf(r *runner.Runner, result *runner.RunResult) (bufID str
 	return bufID, truncated
 }
 
+// buildExecToolResult creates a tool response for exec/ssh_exec.
+// When output was truncated and stored in BufStore, returns a multi-block
+// response: compact summary text + resource reference to buf://<id>.
+// When output fits without truncation: single text block.
+func buildExecToolResult(r *runner.Runner, result runner.RunResult, bufID string, truncated bool) toolResult {
+	isErr := !result.Allowed || result.Error != ""
+	resp := execResponse{RunResult: result, BufID: bufID, Truncated: truncated}
+	if bufID != "" {
+		resp.BufBytes = r.BufStore.Len(bufID)
+	}
+	out, _ := json.Marshal(resp)
+	blocks := []contentBlock{{Type: "text", Text: string(out)}}
+
+	// multi-block: append a resource reference so hosts can fetch full output
+	if truncated && bufID != "" {
+		preview := r.BufStore.Slice(bufID, 0, 500)
+		blocks = append(blocks, contentBlock{
+			Type: "resource",
+			Resource: &resourceRef{
+				URI:      "buf://" + bufID,
+				MimeType: "text/plain",
+				Text:     preview,
+			},
+		})
+	}
+
+	return toolResult{IsError: isErr, Content: blocks}
+}
+
 // cacheResult stores a successful exec result in the ResultCache.
 func cacheResult(r *runner.Runner, host, command string, result *runner.RunResult) {
 	if r.ResultCache == nil || !result.Allowed || result.Error != "" || result.TimedOut {
@@ -797,7 +845,7 @@ func formatCacheHit(e *cache.Entry) string {
 		Cached:    true,
 		CacheHash: e.Hash,
 	}
-	out, _ := json.MarshalIndent(r, "", "  ")
+	out, _ := json.Marshal(r)
 	return string(out)
 }
 
@@ -883,17 +931,17 @@ func toolDefinitions() []toolDef {
 	return []toolDef{
 		{
 			Name:        "exec",
-			Description: "Execute a command on the local machine. Commands pass through security filters that block shell escapes, destructive operations, and data exfiltration. Use this for general-purpose shell commands.",
+			Description: "Use this to run a shell command on the local machine. Security filters block shell escapes, destructive ops, and exfiltration. Long output is truncated with a buf:// resource URI for paging.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"command": map[string]any{
 						"type":        "string",
-						"description": "Shell command to execute locally",
+						"description": "Shell command to run",
 					},
 					"nocache": map[string]any{
 						"type":        "boolean",
-						"description": "Bypass result cache and force re-execution",
+						"description": "Set true to skip cache and force re-execution",
 					},
 				},
 				"required": []string{"command"},
@@ -906,21 +954,21 @@ func toolDefinitions() []toolDef {
 		},
 		{
 			Name:        "ssh_exec",
-			Description: "Execute a command on a remote host via SSH. The command must be allowed by the security policy. Returns stdout, stderr, exit code, and execution metadata.",
+			Description: "Use this to run a policy-allowed command on a remote host via SSH. Returns stdout, stderr, and exit code. Truncated output includes a buf:// resource URI. Use ssh_validate first if unsure whether a command is allowed.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"host": map[string]any{
 						"type":        "string",
-						"description": "Target host name (as defined in the policy file)",
+						"description": "Target host from policy (read host://{name}/allowed to see what's permitted)",
 					},
 					"command": map[string]any{
 						"type":        "string",
-						"description": "Command to execute on the remote host",
+						"description": "Command to run on the remote host",
 					},
 					"nocache": map[string]any{
 						"type":        "boolean",
-						"description": "Bypass result cache and force re-execution",
+						"description": "Set true to skip cache and force re-execution",
 					},
 				},
 				"required": []string{"host", "command"},
@@ -933,13 +981,13 @@ func toolDefinitions() []toolDef {
 		},
 		{
 			Name:        "ssh_validate",
-			Description: "Check if a command would be allowed on a host without executing it. Use this to verify before running commands.",
+			Description: "Use this to dry-run a command against the policy without executing it. Returns allowed/denied with reason. Prefer this before ssh_exec when you need to check permission first.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"host": map[string]any{
 						"type":        "string",
-						"description": "Target host name",
+						"description": "Target host from policy",
 					},
 					"command": map[string]any{
 						"type":        "string",
@@ -955,38 +1003,19 @@ func toolDefinitions() []toolDef {
 			},
 		},
 		{
-			Name:        "ssh_list_allowed",
-			Description: "List all commands that are allowed on a given host. Use this to discover what operations are available.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"host": map[string]any{
-						"type":        "string",
-						"description": "Target host name",
-					},
-				},
-				"required": []string{"host"},
-			},
-			Annotations: &toolAnnotations{
-				Title:          "List Allowed Commands",
-				ReadOnlyHint:   boolPtr(true),
-				IdempotentHint: boolPtr(true),
-			},
-		},
-		{
 			Name:        "batch_exec",
-			Description: "Execute multiple commands in a single call. Each command is individually validated. For SSH hosts, commands share a pooled connection for lower latency. Use 'local' as host for local commands.",
+			Description: "Use this to run multiple commands in one call. Each command is validated individually. SSH commands share a pooled connection for lower latency. Use host='local' for local execution.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"host": map[string]any{
 						"type":        "string",
-						"description": "Target host name, or 'local' for local execution",
+						"description": "Target host, or 'local' for local execution",
 					},
 					"commands": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
-						"description": "Array of commands to execute sequentially",
+						"description": "Commands to execute sequentially",
 					},
 				},
 				"required": []string{"host", "commands"},
@@ -999,11 +1028,11 @@ func toolDefinitions() []toolDef {
 		},
 		{
 			Name:        "host_info",
-			Description: "Fingerprint a remote host: OS, kernel, shell, package manager, and installed tools. Cached for 30 minutes. Use refresh: true to force re-probe.",
+			Description: "Use this to probe a host's OS, kernel, shell, package manager, and installed tools. Results are cached (30min). Also available as host://{name}/info resource for cached reads. Set refresh=true to force re-probe.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"host":    map[string]any{"type": "string", "description": "Host name as defined in policy"},
+					"host":    map[string]any{"type": "string", "description": "Host from policy to fingerprint"},
 					"refresh": map[string]any{"type": "boolean", "description": "Force re-probe even if cached"},
 				},
 				"required": []string{"host"},
@@ -1015,32 +1044,14 @@ func toolDefinitions() []toolDef {
 			},
 		},
 		{
-			Name:        "get_output",
-			Description: "Read a slice of full command output from a buffer handle. When exec or ssh_exec returns a buf_id, use this to page through the untruncated content.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"buf_id": map[string]any{"type": "string", "description": "Handle returned by exec/ssh_exec"},
-					"offset": map[string]any{"type": "integer", "description": "Byte offset (default 0)"},
-					"length": map[string]any{"type": "integer", "description": "Max bytes to return (default 8192)"},
-				},
-				"required": []string{"buf_id"},
-			},
-			Annotations: &toolAnnotations{
-				Title:          "Read Output Buffer",
-				ReadOnlyHint:   boolPtr(true),
-				IdempotentHint: boolPtr(true),
-			},
-		},
-		{
 			Name:        "grep_output",
-			Description: "Search a buffered command output for lines matching a regex. Returns matching lines without loading the full output.",
+			Description: "Use this to search a buffered output for lines matching a regex. When exec/ssh_exec returns a buf_id, use this instead of reading the full buffer. Returns only matching lines.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"buf_id":    map[string]any{"type": "string", "description": "Handle returned by exec/ssh_exec"},
-					"pattern":   map[string]any{"type": "string", "description": "Regex to match against each line"},
-					"max_lines": map[string]any{"type": "integer", "description": "Max matching lines to return (default 100)"},
+					"buf_id":    map[string]any{"type": "string", "description": "Buffer handle from exec/ssh_exec response"},
+					"pattern":   map[string]any{"type": "string", "description": "Regex pattern to match against each line"},
+					"max_lines": map[string]any{"type": "integer", "description": "Max matching lines (default 100)"},
 				},
 				"required": []string{"buf_id", "pattern"},
 			},
@@ -1052,17 +1063,17 @@ func toolDefinitions() []toolDef {
 		},
 		{
 			Name:        "cache_invalidate",
-			Description: "Invalidate a specific result cache entry or flush the entire cache. Omit host and command to flush everything.",
+			Description: "Use this when you need fresh results from a previously cached command. Specify host+command for a single entry, or omit both to flush the entire cache.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"host": map[string]any{
 						"type":        "string",
-						"description": "Host name of the entry to invalidate",
+						"description": "Host of the entry to invalidate (omit to flush all)",
 					},
 					"command": map[string]any{
 						"type":        "string",
-						"description": "Command string of the entry to invalidate",
+						"description": "Command of the entry to invalidate (omit to flush all)",
 					},
 				},
 			},
@@ -1073,34 +1084,34 @@ func toolDefinitions() []toolDef {
 		},
 		{
 			Name:        "find_files",
-			Description: "Search for files by name on a host. Uses fd if available, falls back to find. Results are filenames only (no content). Use grep_files to search by content.",
+			Description: "Use this to locate files by name on a host. Returns paths only (no content). Use grep_files when you need to search file contents instead.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"host":        map[string]any{"type": "string", "description": "Target host or 'local'"},
-					"query":       map[string]any{"type": "string", "description": "Filename substring to search for (case-insensitive)"},
-					"path":        map[string]any{"type": "string", "description": "Directory to search in (default '.')"},
-					"max_results": map[string]any{"type": "integer", "description": "Max results to return (default 50)"},
+					"query":       map[string]any{"type": "string", "description": "Filename substring (case-insensitive)"},
+					"path":        map[string]any{"type": "string", "description": "Directory to search (default '.')"},
+					"max_results": map[string]any{"type": "integer", "description": "Max results (default 50)"},
 				},
 				"required": []string{"host", "query"},
 			},
 			Annotations: &toolAnnotations{
-				Title:        "Find Files",
-				ReadOnlyHint: boolPtr(true),
+				Title:         "Find Files",
+				ReadOnlyHint:  boolPtr(true),
 				OpenWorldHint: boolPtr(true),
 			},
 		},
 		{
 			Name:        "grep_files",
-			Description: "Search file contents on a host for lines matching a regex. Uses rg (ripgrep) if available, falls back to grep -r. Returns matching lines with filename and line number.",
+			Description: "Use this to search file contents on a host for lines matching a regex. Returns filename:line_number:match. Use find_files when you only need filenames.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"host":        map[string]any{"type": "string", "description": "Target host or 'local'"},
 					"pattern":     map[string]any{"type": "string", "description": "Regex pattern to search for"},
-					"path":        map[string]any{"type": "string", "description": "Directory to search in (default '.')"},
-					"glob":        map[string]any{"type": "string", "description": "File glob filter, e.g. '*.go' or '*.py' (optional)"},
-					"max_results": map[string]any{"type": "integer", "description": "Max matching lines to return (default 50)"},
+					"path":        map[string]any{"type": "string", "description": "Directory to search (default '.')"},
+					"glob":        map[string]any{"type": "string", "description": "File filter glob, e.g. '*.go'"},
+					"max_results": map[string]any{"type": "integer", "description": "Max matching lines (default 50)"},
 				},
 				"required": []string{"host", "pattern"},
 			},
@@ -1110,19 +1121,220 @@ func toolDefinitions() []toolDef {
 				OpenWorldHint: boolPtr(true),
 			},
 		},
+	}
+}
+
+// --- Resource implementation ---
+
+// resourcesList returns all available resources and URI templates.
+func resourcesList(r *runner.Runner) resourcesListResult {
+	resources := []resourceDef{
 		{
-			Name:        "get_stats",
-			Description: "Get output processing statistics for this session. Shows total calls, raw bytes, processed bytes, and savings percentage.",
-			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
-			},
-			Annotations: &toolAnnotations{
-				Title:        "Session Stats",
-				ReadOnlyHint: boolPtr(true),
-			},
+			URI:         "stats://session",
+			Name:        "Session Stats",
+			Description: "Output processing statistics for this session",
+			MimeType:    "application/json",
+		},
+		{
+			URI:         "policy://current",
+			Name:        "Active Policy",
+			Description: "Summary of the active security policy",
+			MimeType:    "application/json",
 		},
 	}
+
+	// add a resource per configured host
+	if r.Policy != nil {
+		for name := range r.Policy.Hosts {
+			resources = append(resources, resourceDef{
+				URI:      "host://" + name + "/allowed",
+				Name:     name + " allowed commands",
+				MimeType: "text/plain",
+			})
+			resources = append(resources, resourceDef{
+				URI:      "host://" + name + "/info",
+				Name:     name + " host info",
+				MimeType: "application/json",
+			})
+		}
+	}
+
+	// dynamic buf:// entries
+	if r.BufStore != nil {
+		for _, id := range r.BufStore.IDs() {
+			resources = append(resources, resourceDef{
+				URI:      "buf://" + id,
+				Name:     "Output buffer " + id,
+				MimeType: "text/plain",
+			})
+		}
+	}
+
+	templates := []resourceTmplDef{
+		{
+			URITemplate: "host://{name}/allowed",
+			Name:        "Host allowed commands",
+			Description: "Allowed commands for a policy-defined host",
+			MimeType:    "text/plain",
+		},
+		{
+			URITemplate: "host://{name}/info",
+			Name:        "Host fingerprint",
+			Description: "Cached OS/kernel/tools fingerprint for a host",
+			MimeType:    "application/json",
+		},
+		{
+			URITemplate: "buf://{id}",
+			Name:        "Output buffer",
+			Description: "Full command output stored after truncation",
+			MimeType:    "text/plain",
+		},
+	}
+
+	return resourcesListResult{Resources: resources, ResourceTemplates: templates}
+}
+
+// resourcesRead resolves a URI and returns its contents.
+func resourcesRead(r *runner.Runner, uri string) (*resourcesReadResult, error) {
+	switch {
+	case uri == "stats://session":
+		return readStatsResource(r)
+	case uri == "policy://current":
+		return readPolicyResource(r)
+	case strings.HasPrefix(uri, "host://"):
+		return readHostResource(r, uri)
+	case strings.HasPrefix(uri, "buf://"):
+		return readBufResource(r, uri)
+	default:
+		return nil, fmt.Errorf("unknown resource URI: %s", uri)
+	}
+}
+
+func readStatsResource(r *runner.Runner) (*resourcesReadResult, error) {
+	if r.OutputStats == nil {
+		return nil, fmt.Errorf("output stats not enabled")
+	}
+	s := r.OutputStats.Snapshot()
+	out, _ := json.Marshal(map[string]any{
+		"calls":       s.Calls,
+		"raw_bytes":   s.RawBytes,
+		"output_bytes": s.OutBytes,
+		"savings_pct": fmt.Sprintf("%.1f", s.SavingsPct()),
+	})
+	return &resourcesReadResult{
+		Contents: []resourceContent{{URI: "stats://session", MimeType: "application/json", Text: string(out)}},
+	}, nil
+}
+
+func readPolicyResource(r *runner.Runner) (*resourcesReadResult, error) {
+	if r.Policy == nil {
+		return nil, fmt.Errorf("no policy loaded")
+	}
+	summary := map[string]any{
+		"local_mode": r.Policy.Local.Mode,
+	}
+	hosts := map[string]any{}
+	for name, hp := range r.Policy.Hosts {
+		cmds := make([]string, 0, len(hp.AllowedCommands))
+		for _, rule := range hp.AllowedCommands {
+			if rule.Command != "" {
+				cmds = append(cmds, rule.Command)
+			} else if rule.Pattern != "" {
+				cmds = append(cmds, "/"+rule.Pattern+"/")
+			}
+		}
+		hosts[name] = map[string]any{
+			"user":             hp.User,
+			"allowed_commands": cmds,
+			"denied_patterns":  hp.DeniedPatterns,
+		}
+	}
+	summary["hosts"] = hosts
+	out, _ := json.Marshal(summary)
+	return &resourcesReadResult{
+		Contents: []resourceContent{{URI: "policy://current", MimeType: "application/json", Text: string(out)}},
+	}, nil
+}
+
+func readHostResource(r *runner.Runner, uri string) (*resourcesReadResult, error) {
+	// parse host://<name>/<subpath>
+	path := strings.TrimPrefix(uri, "host://")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid host URI: %s (expected host://<name>/allowed or host://<name>/info)", uri)
+	}
+	name, sub := parts[0], parts[1]
+
+	switch sub {
+	case "allowed":
+		hp := r.ListAllowed(name)
+		text := formatAllowed(name, hp)
+		return &resourcesReadResult{
+			Contents: []resourceContent{{URI: uri, MimeType: "text/plain", Text: text}},
+		}, nil
+
+	case "info":
+		if r.HostInfoCache == nil {
+			return nil, fmt.Errorf("host info cache not enabled")
+		}
+		info := r.HostInfoCache.Get(name)
+		if info == nil {
+			return &resourcesReadResult{
+				Contents: []resourceContent{{URI: uri, MimeType: "application/json", Text: `{"status":"not cached, use host_info tool with refresh:true to probe"}`}},
+			}, nil
+		}
+		return &resourcesReadResult{
+			Contents: []resourceContent{{URI: uri, MimeType: "application/json", Text: info.JSON()}},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unknown host sub-resource: %s (expected 'allowed' or 'info')", sub)
+	}
+}
+
+func readBufResource(r *runner.Runner, uri string) (*resourcesReadResult, error) {
+	if r.BufStore == nil {
+		return nil, fmt.Errorf("output buffer not enabled")
+	}
+
+	// parse buf://<id> with optional ?offset=N&length=M
+	raw := strings.TrimPrefix(uri, "buf://")
+	id := raw
+	offset := 0
+	length := 0 // 0 = full content
+
+	if qIdx := strings.Index(raw, "?"); qIdx >= 0 {
+		id = raw[:qIdx]
+		query := raw[qIdx+1:]
+		for _, param := range strings.Split(query, "&") {
+			kv := strings.SplitN(param, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			switch kv[0] {
+			case "offset":
+				fmt.Sscanf(kv[1], "%d", &offset)
+			case "length":
+				fmt.Sscanf(kv[1], "%d", &length)
+			}
+		}
+	}
+
+	total := r.BufStore.Len(id)
+	if total == 0 {
+		return nil, fmt.Errorf("buf_id %q not found", id)
+	}
+
+	var text string
+	if length > 0 {
+		text = r.BufStore.Slice(id, offset, length)
+	} else {
+		text = r.BufStore.Slice(id, 0, total)
+	}
+
+	return &resourcesReadResult{
+		Contents: []resourceContent{{URI: "buf://" + id, MimeType: "text/plain", Text: text}},
+	}, nil
 }
 
 func formatAllowed(host string, hp policy.HostPolicy) string {
@@ -1198,4 +1410,160 @@ func respondError(id any, code int, message string) *jsonrpcResponse {
 
 func writeError(enc *json.Encoder, id any, code int, message string) {
 	enc.Encode(respondError(id, code, message))
+}
+
+// --- Prompts implementation ---
+
+type promptsListResult struct {
+	Prompts []promptDef `json:"prompts"`
+}
+
+type promptDef struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	Arguments   []promptArg `json:"arguments,omitempty"`
+}
+
+type promptArg struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+type promptsGetParams struct {
+	Name      string         `json:"name"`
+	Arguments map[string]string `json:"arguments,omitempty"`
+}
+
+type promptsGetResult struct {
+	Description string          `json:"description,omitempty"`
+	Messages    []promptMessage `json:"messages"`
+}
+
+type promptMessage struct {
+	Role    string       `json:"role"`
+	Content promptContent `json:"content"`
+}
+
+type promptContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func promptDefinitions() []promptDef {
+	return []promptDef{
+		{
+			Name:        "diagnose-host",
+			Description: "Run standard diagnostic commands on a host and interpret the results",
+			Arguments: []promptArg{
+				{Name: "host", Description: "Host to diagnose (from policy)", Required: true},
+			},
+		},
+		{
+			Name:        "compare-hosts",
+			Description: "Fingerprint two hosts and compare their configurations",
+			Arguments: []promptArg{
+				{Name: "host_a", Description: "First host to compare", Required: true},
+				{Name: "host_b", Description: "Second host to compare", Required: true},
+			},
+		},
+		{
+			Name:        "safety-review",
+			Description: "Validate a command against policy and review it for security risks",
+			Arguments: []promptArg{
+				{Name: "host", Description: "Target host", Required: true},
+				{Name: "command", Description: "Command to review", Required: true},
+			},
+		},
+	}
+}
+
+func getPrompt(params promptsGetParams) (*promptsGetResult, error) {
+	switch params.Name {
+	case "diagnose-host":
+		host := params.Arguments["host"]
+		if host == "" {
+			return nil, fmt.Errorf("argument 'host' is required")
+		}
+		return &promptsGetResult{
+			Description: "Diagnose " + host,
+			Messages: []promptMessage{
+				{
+					Role: "user",
+					Content: promptContent{
+						Type: "text",
+						Text: fmt.Sprintf(
+							"Diagnose the host %q. Run the following commands and interpret the results:\n\n"+
+								"1. `uptime` -- check load and how long it has been running\n"+
+								"2. `df -h` -- check disk usage, flag anything above 80%%\n"+
+								"3. `free -m` -- check memory pressure\n"+
+								"4. `last -5` -- check recent logins for anything unusual\n\n"+
+								"Start by reading host://%s/allowed to see what commands are available, "+
+								"then use host_info to fingerprint the OS. Adapt commands if the host "+
+								"uses a different package manager or init system. Summarize findings "+
+								"with actionable recommendations.",
+							host, host),
+					},
+				},
+			},
+		}, nil
+
+	case "compare-hosts":
+		a := params.Arguments["host_a"]
+		b := params.Arguments["host_b"]
+		if a == "" || b == "" {
+			return nil, fmt.Errorf("arguments 'host_a' and 'host_b' are required")
+		}
+		return &promptsGetResult{
+			Description: fmt.Sprintf("Compare %s vs %s", a, b),
+			Messages: []promptMessage{
+				{
+					Role: "user",
+					Content: promptContent{
+						Type: "text",
+						Text: fmt.Sprintf(
+							"Compare the hosts %q and %q.\n\n"+
+								"1. Use host_info on both to fingerprint OS, kernel, shell, and tools\n"+
+								"2. Read host://%s/allowed and host://%s/allowed to compare permitted commands\n"+
+								"3. Run `uname -a` and `uptime` on both\n\n"+
+								"Present a side-by-side comparison table, highlight differences, "+
+								"and note any configuration drift that could cause issues.",
+							a, b, a, b),
+					},
+				},
+			},
+		}, nil
+
+	case "safety-review":
+		host := params.Arguments["host"]
+		command := params.Arguments["command"]
+		if host == "" || command == "" {
+			return nil, fmt.Errorf("arguments 'host' and 'command' are required")
+		}
+		return &promptsGetResult{
+			Description: fmt.Sprintf("Safety review: %s on %s", command, host),
+			Messages: []promptMessage{
+				{
+					Role: "user",
+					Content: promptContent{
+						Type: "text",
+						Text: fmt.Sprintf(
+							"Review the safety of running `%s` on host %q.\n\n"+
+								"1. Use ssh_validate to check if the policy allows it\n"+
+								"2. Read host://%s/allowed to understand the full allowlist context\n"+
+								"3. Analyze the command for:\n"+
+								"   - GTFOBins risk (could it be used to escalate privileges?)\n"+
+								"   - Data exfiltration potential\n"+
+								"   - Destructive side effects\n"+
+								"   - Shell injection vectors\n\n"+
+								"Provide a verdict: SAFE, CAUTION, or DANGEROUS, with reasoning.",
+							command, host, host),
+					},
+				},
+			},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unknown prompt: %s", params.Name)
+	}
 }

@@ -50,6 +50,15 @@ func (s *Store) Put(content string) string {
 	return id
 }
 
+// IDs returns all active buffer IDs in insertion order.
+func (s *Store) IDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.order))
+	copy(out, s.order)
+	return out
+}
+
 // Len returns the byte length of a buffer. Returns 0 if not found.
 func (s *Store) Len(id string) int {
 	s.mu.Lock()
