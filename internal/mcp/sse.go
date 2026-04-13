@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -14,6 +15,24 @@ import (
 	"github.com/hed0rah/wrapster/internal/runner"
 )
 
+// gzipSSEWriter wraps a gzip.Writer + ResponseWriter so that Flush() drains
+// the gzip compressor (BSYNC flush) before flushing the underlying HTTP layer.
+// This is required for SSE: each event must be immediately decodable by the client.
+type gzipSSEWriter struct {
+	gz *gzip.Writer
+	w  http.ResponseWriter
+	f  http.Flusher
+}
+
+func (g *gzipSSEWriter) Header() http.Header         { return g.w.Header() }
+func (g *gzipSSEWriter) Write(b []byte) (int, error) { return g.gz.Write(b) }
+func (g *gzipSSEWriter) WriteHeader(code int)        { g.w.WriteHeader(code) }
+
+func (g *gzipSSEWriter) Flush() {
+	g.gz.Flush() // sync flush -- compressor state survives, output decodable
+	g.f.Flush()  // push bytes to the client over HTTP
+}
+
 // SSEServer runs an MCP server over HTTP with Server-Sent Events transport.
 // Implements the legacy (2024-11-05) SSE spec: GET /sse for event stream,
 // POST /message?sessionId=X for client requests.
@@ -25,10 +44,12 @@ type SSEServer struct {
 }
 
 type sseSession struct {
-	id     string
-	ch     chan []byte
-	ctx    context.Context
-	cancel context.CancelFunc
+	id      string
+	ch      chan []byte
+	ctx     context.Context
+	cancel  context.CancelFunc
+	cancels *cancelRegistry // in-flight tool call cancellations for this session
+	state   *connState      // MCP connection lifecycle for this session
 }
 
 func NewSSEServer(r *runner.Runner, addr string) *SSEServer {
@@ -65,14 +86,28 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wrap with gzip if the client supports it. Must happen before any header writes.
+	var fw http.Flusher = flusher
+	var ww http.ResponseWriter = w
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		gz, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+		defer gz.Close()
+		w.Header().Set("Content-Encoding", "gzip")
+		gw := &gzipSSEWriter{gz: gz, w: w, f: flusher}
+		ww = gw
+		fw = gw
+	}
+
 	sessionID := generateSessionID()
 	ctx, cancel := context.WithCancel(r.Context())
 
 	sess := &sseSession{
-		id:     sessionID,
-		ch:     make(chan []byte, 64),
-		ctx:    ctx,
-		cancel: cancel,
+		id:      sessionID,
+		ch:      make(chan []byte, 64),
+		ctx:     ctx,
+		cancel:  cancel,
+		cancels: newCancelRegistry(),
+		state:   &connState{},
 	}
 
 	s.mu.Lock()
@@ -86,11 +121,11 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}()
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ww.Header().Set("Content-Type", "text/event-stream")
+	ww.Header().Set("Cache-Control", "no-cache")
+	ww.Header().Set("Connection", "keep-alive")
+	ww.Header().Set("X-Accel-Buffering", "no")
+	ww.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// Send endpoint event with full URL -- some clients require absolute URL.
 	scheme := "http"
@@ -99,14 +134,14 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		host = s.addr
 	}
 	endpointURL := fmt.Sprintf("%s://%s/message?sessionId=%s", scheme, host, sessionID)
-	fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpointURL)
-	flusher.Flush()
+	fmt.Fprintf(ww, "event: endpoint\ndata: %s\n\n", endpointURL)
+	fw.Flush()
 
 	for {
 		select {
 		case msg := <-sess.ch:
-			fmt.Fprintf(w, "event: message\ndata: %s\n\n", msg)
-			flusher.Flush()
+			fmt.Fprintf(ww, "event: message\ndata: %s\n\n", msg)
+			fw.Flush()
 		case <-ctx.Done():
 			return
 		}
@@ -150,12 +185,33 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	msg := &msgVal
 
+	// State machine gate: enforce CONNECTED -> INITIALIZING -> READY.
+	if reject := gateMethod(sess.state, msg); reject != nil {
+		data, _ := json.Marshal(reject)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+		return
+	}
+
 	// Return 202 immediately per spec.
 	w.WriteHeader(http.StatusAccepted)
 
+	// notify pushes a JSON-RPC notification to the SSE stream.
+	notify := notifyFunc(func(method string, params any) {
+		data, err := json.Marshal(jsonrpcNotification{JSONRPC: "2.0", Method: method, Params: params})
+		if err != nil {
+			return
+		}
+		select {
+		case sess.ch <- data:
+		case <-sess.ctx.Done():
+		}
+	})
+
 	// Handle in a goroutine; push response to the SSE stream.
 	go func() {
-		response := handleMessage(s.runner, msg)
+		response := handleMessage(s.runner, msg, sess.cancels, sess.state, notify)
 		if response != nil {
 			data, err := json.Marshal(response)
 			if err != nil {
