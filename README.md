@@ -81,16 +81,39 @@ wrapster --mcp-sse :8080 --policy /path/to/policy.yaml
 # connects to 127.0.0.1:8080 by default
 ```
 
-Six tools exposed:
+### Tools (9)
 
 | Tool | Params | Description |
 |------|--------|-------------|
 | `exec` | `command` | Run a command locally (guardrail mode) |
 | `ssh_exec` | `host`, `command` | Run a command on a remote host |
 | `ssh_validate` | `host`, `command` | Dry-run validate without executing |
-| `ssh_list_allowed` | `host` | List allowed commands for a host |
 | `batch_exec` | `host`, `commands` | Run multiple commands in one call |
-| `get_stats` | -- | Output processing stats for this session |
+| `host_info` | `host`, `refresh?` | Fingerprint host OS/kernel/tools (cached 30min) |
+| `grep_output` | `buf_id`, `pattern` | Regex search a buffered output |
+| `cache_invalidate` | `host?`, `command?` | Invalidate result cache entries |
+| `find_files` | `host`, `query` | Search for files by name |
+| `grep_files` | `host`, `pattern` | Search file contents by regex |
+
+### Resources
+
+| URI | Description |
+|-----|-------------|
+| `stats://session` | Output processing stats (JSON) |
+| `policy://current` | Active policy summary (JSON) |
+| `host://{name}/allowed` | Allowed commands for a host |
+| `host://{name}/info` | Cached host fingerprint (JSON) |
+| `buf://{id}` | Full command output buffer (`?offset=N&length=M`) |
+
+Truncated exec output includes a `buf://` reference automatically.
+
+### Prompts
+
+| Prompt | Arguments | Description |
+|--------|-----------|-------------|
+| `diagnose-host` | `host` | Run uptime/df/free/last and interpret |
+| `compare-hosts` | `host_a`, `host_b` | Fingerprint and diff two hosts |
+| `safety-review` | `host`, `command` | Validate + review for security risks |
 
 ### Claude Desktop config
 
@@ -111,7 +134,7 @@ Command output is post-processed before returning to the LLM to save tokens:
 
 - **ANSI stripping**: removes escape codes from colored terminal output (default: on)
 - **Truncation**: keeps first 64 + last 16 lines, drops the middle with a count marker (default: on, threshold 8192 chars)
-- **Stats**: tracks raw vs processed bytes across the session, exposed via `get_stats`
+- **Stats**: tracks raw vs processed bytes across the session, exposed via `stats://session` resource
 
 ```yaml
 output:
@@ -165,3 +188,7 @@ Deny by default. A command must match an `allowed_commands` rule to run.
 | `--watch <duration>` | `-w` | Poll interval (e.g. `30s`, `1m`) |
 | `--mcp` | | MCP server over stdio |
 | `--mcp-sse <addr>` | | MCP server over HTTP SSE |
+| `--cache-ttl <dur>` | | Result cache TTL (default: `30s`) |
+| `--hostinfo-ttl <dur>` | | Host info cache TTL (default: `30m`) |
+| `--bufstore-max <n>` | | Max output buffer entries (default: `64`) |
+| `--version` | | Show version and exit |
