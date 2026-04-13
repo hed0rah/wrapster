@@ -34,16 +34,20 @@ Modes:
   wrapster --watch 30s <host> <cmd>       Poll a command on an interval
 
 Flags:
-  -p, --policy <path>     Policy file (default: ./policy.yaml, then ~/.config/wrapster/policy.yaml)
-  -a, --audit  <path>     Audit log file (default: stderr)
-  -j, --json              Output result as JSON
-  -n, --dry-run           Validate command without executing
-  -l, --list              List allowed commands for a host
-  -s, --ssh-args <args>   Extra SSH args (comma-separated)
-  -w, --watch <interval>  Poll interval (e.g. 30s, 1m, 5m)
-      --mcp               MCP server over stdio
-      --mcp-sse <addr>    MCP server over HTTP SSE (e.g. :8080, 127.0.0.1:8080)
-  -h, --help              Show this help
+  -p, --policy <path>       Policy file (default: ./policy.yaml, then ~/.config/wrapster/policy.yaml)
+  -a, --audit  <path>       Audit log file (default: stderr)
+  -j, --json                Output result as JSON
+  -n, --dry-run             Validate command without executing
+  -l, --list                List allowed commands for a host
+  -s, --ssh-args <args>     Extra SSH args (comma-separated)
+  -w, --watch <interval>    Poll interval (e.g. 30s, 1m, 5m)
+      --mcp                 MCP server over stdio
+      --mcp-sse <addr>      MCP server over HTTP SSE (e.g. :8080, 127.0.0.1:8080)
+      --cache-ttl <dur>     Result cache TTL (default: 30s)
+      --hostinfo-ttl <dur>  Host info cache TTL (default: 30m)
+      --bufstore-max <n>    Max output buffer entries (default: 64)
+      --version             Show version and exit
+  -h, --help                Show this help
 
 Examples:
   wrapster prod-web "uptime"
@@ -54,17 +58,21 @@ Examples:
 `
 
 type config struct {
-	policyPath string
-	auditPath  string
-	jsonOutput bool
-	dryRun     bool
-	listMode   bool
-	mcpMode    bool
-	mcpSSEAddr string
-	sshArgs    []string
-	watch      time.Duration
-	host       string
-	command    string
+	policyPath   string
+	auditPath    string
+	jsonOutput   bool
+	dryRun       bool
+	listMode     bool
+	mcpMode      bool
+	mcpSSEAddr   string
+	sshArgs      []string
+	watch        time.Duration
+	host         string
+	command      string
+	cacheTTL     time.Duration
+	hostinfoTTL  time.Duration
+	bufstoreMax  int
+	showVersion  bool
 }
 
 func main() {
@@ -72,6 +80,11 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n\n%s", err, usage)
 		os.Exit(2)
+	}
+
+	if cfg.showVersion {
+		fmt.Printf("wrapster %s\n", mcp.Version)
+		return
 	}
 
 	pol, err := loadPolicyFromPaths(cfg.policyPath)
@@ -96,14 +109,28 @@ func main() {
 		fatal("filters", err)
 	}
 
+	// apply tuning defaults
+	cacheTTL := 30 * time.Second
+	if cfg.cacheTTL > 0 {
+		cacheTTL = cfg.cacheTTL
+	}
+	hostinfoTTL := 30 * time.Minute
+	if cfg.hostinfoTTL > 0 {
+		hostinfoTTL = cfg.hostinfoTTL
+	}
+	bufstoreMax := 0 // 0 = use default inside bufstore.New
+	if cfg.bufstoreMax > 0 {
+		bufstoreMax = cfg.bufstoreMax
+	}
+
 	r := &runner.Runner{
 		Policy:        pol,
 		Logger:        logger,
 		Filters:       chain,
 		OutputStats:   &output.Tracker{},
-		ResultCache:   cache.New(30 * time.Second),
-		BufStore:      bufstore.New(),
-		HostInfoCache: hostinfo.New(30 * time.Minute),
+		ResultCache:   cache.New(cacheTTL),
+		BufStore:      bufstore.New(bufstoreMax),
+		HostInfoCache: hostinfo.New(hostinfoTTL),
 	}
 
 	// --mcp mode (stdio)
@@ -240,6 +267,8 @@ func parseArgs(args []string) (*config, error) {
 		case arg == "-h" || arg == "--help":
 			fmt.Print(usage)
 			os.Exit(0)
+		case arg == "--version":
+			cfg.showVersion = true
 		case arg == "-p" || arg == "--policy":
 			i++
 			if i >= len(args) {
@@ -271,6 +300,36 @@ func parseArgs(args []string) (*config, error) {
 				return nil, fmt.Errorf("--watch: minimum interval is 5s")
 			}
 			cfg.watch = d
+		case arg == "--cache-ttl":
+			i++
+			if i >= len(args) {
+				return nil, fmt.Errorf("--cache-ttl requires a duration (e.g. 30s, 5m)")
+			}
+			d, err := time.ParseDuration(args[i])
+			if err != nil {
+				return nil, fmt.Errorf("--cache-ttl: invalid duration %q: %w", args[i], err)
+			}
+			cfg.cacheTTL = d
+		case arg == "--hostinfo-ttl":
+			i++
+			if i >= len(args) {
+				return nil, fmt.Errorf("--hostinfo-ttl requires a duration (e.g. 30m, 1h)")
+			}
+			d, err := time.ParseDuration(args[i])
+			if err != nil {
+				return nil, fmt.Errorf("--hostinfo-ttl: invalid duration %q: %w", args[i], err)
+			}
+			cfg.hostinfoTTL = d
+		case arg == "--bufstore-max":
+			i++
+			if i >= len(args) {
+				return nil, fmt.Errorf("--bufstore-max requires a number")
+			}
+			n := 0
+			if _, err := fmt.Sscanf(args[i], "%d", &n); err != nil || n <= 0 {
+				return nil, fmt.Errorf("--bufstore-max: must be a positive integer, got %q", args[i])
+			}
+			cfg.bufstoreMax = n
 		case arg == "--mcp":
 			cfg.mcpMode = true
 		case arg == "--mcp-sse":
@@ -292,7 +351,7 @@ func parseArgs(args []string) (*config, error) {
 		}
 	}
 
-	if cfg.mcpMode || cfg.mcpSSEAddr != "" {
+	if cfg.showVersion || cfg.mcpMode || cfg.mcpSSEAddr != "" {
 		return cfg, nil
 	}
 

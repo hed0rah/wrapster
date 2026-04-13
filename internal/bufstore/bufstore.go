@@ -13,18 +13,24 @@ import (
 	"sync"
 )
 
-const maxEntries = 64 // max concurrent buffers; oldest evicted when full
+const defaultMaxEntries = 64 // max concurrent buffers; oldest evicted when full
 
 // Store is a session-scoped ring buffer of command outputs keyed by buf_id.
 type Store struct {
-	mu      sync.Mutex
-	entries map[string]string // buf_id -> full content
-	order   []string          // insertion order for eviction
+	mu         sync.Mutex
+	entries    map[string]string // buf_id -> full content
+	order      []string          // insertion order for eviction
+	maxEntries int
 }
 
-func New() *Store {
+// New creates a Store with the given max entry count. If max <= 0, uses 64.
+func New(max int) *Store {
+	if max <= 0 {
+		max = defaultMaxEntries
+	}
 	return &Store{
-		entries: make(map[string]string),
+		entries:    make(map[string]string),
+		maxEntries: max,
 	}
 }
 
@@ -33,7 +39,7 @@ func (s *Store) Put(content string) string {
 	id := newID()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.order) >= maxEntries {
+	if len(s.order) >= s.maxEntries {
 		// evict oldest
 		oldest := s.order[0]
 		s.order = s.order[1:]

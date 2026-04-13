@@ -54,6 +54,14 @@ func testRunner(t *testing.T) *runner.Runner {
 	return &runner.Runner{Policy: pol, Logger: logger, OutputStats: &output.Tracker{}}
 }
 
+// readyState returns a connState already in the READY phase,
+// suitable for tests that skip the handshake and test tool behavior directly.
+func readyState() *connState {
+	cs := &connState{}
+	cs.set(stateReady)
+	return cs
+}
+
 func sendRPC(t *testing.T, r *runner.Runner, method string, params any) *jsonrpcResponse {
 	t.Helper()
 	var paramsJSON json.RawMessage
@@ -71,7 +79,7 @@ func sendRPC(t *testing.T, r *runner.Runner, method string, params any) *jsonrpc
 		Method:  method,
 		Params:  paramsJSON,
 	}
-	return handleMessage(r, msg, newCancelRegistry())
+	return handleMessage(r, msg, newCancelRegistry(), readyState())
 }
 
 func TestInitialize(t *testing.T) {
@@ -94,6 +102,34 @@ func TestInitialize(t *testing.T) {
 	}
 	if result.ProtocolVersion != "2024-11-05" {
 		t.Errorf("protocol version = %q, want 2024-11-05", result.ProtocolVersion)
+	}
+}
+
+func TestVersionNegotiation(t *testing.T) {
+	tests := []struct {
+		name     string
+		client   string
+		expected string
+	}{
+		{"empty defaults to 2024-11-05", "", "2024-11-05"},
+		{"2024-11-05 echoed", "2024-11-05", "2024-11-05"},
+		{"2025-03-26 echoed", "2025-03-26", "2025-03-26"},
+		{"unknown falls back", "9999-01-01", "2024-11-05"},
+	}
+
+	r := testRunner(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := sendRPC(t, r, "initialize", initializeParams{
+				ProtocolVersion: tt.client,
+			})
+			b, _ := json.Marshal(resp.Result)
+			var result initializeResult
+			json.Unmarshal(b, &result)
+			if result.ProtocolVersion != tt.expected {
+				t.Errorf("got %q, want %q", result.ProtocolVersion, tt.expected)
+			}
+		})
 	}
 }
 
@@ -195,12 +231,12 @@ func TestToolCallMissingParams(t *testing.T) {
 		Arguments: map[string]any{"host": "prod-web"},
 	})
 
-	b, _ := json.Marshal(resp.Result)
-	var result toolResult
-	json.Unmarshal(b, &result)
-
-	if !result.IsError {
-		t.Error("expected IsError for missing command param")
+	// missing required params now return -32602 JSON-RPC error (protocol level)
+	if resp.Error == nil {
+		t.Fatal("expected JSON-RPC error for missing command param")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("error code = %d, want -32602", resp.Error.Code)
 	}
 }
 
@@ -246,6 +282,56 @@ func TestNotificationNoResponse(t *testing.T) {
 	resp := sendRPC(t, r, "notifications/initialized", nil)
 	if resp != nil {
 		t.Error("notifications should return nil (no response)")
+	}
+}
+
+func TestStateMachineGating(t *testing.T) {
+	cs := &connState{} // starts at stateConnected
+
+	// tools/list before initialize should be rejected
+	msg := &jsonrpcMessage{JSONRPC: "2.0", ID: 1, Method: "tools/list"}
+	reject := gateMethod(cs, msg)
+	if reject == nil {
+		t.Fatal("expected rejection for tools/list before initialize")
+	}
+	if reject.Error == nil || reject.Error.Code != -32600 {
+		t.Fatalf("expected -32600, got %v", reject.Error)
+	}
+
+	// ping should always be allowed
+	msg = &jsonrpcMessage{JSONRPC: "2.0", ID: 2, Method: "ping"}
+	if reject = gateMethod(cs, msg); reject != nil {
+		t.Fatal("ping should be allowed in connected state")
+	}
+
+	// initialize transitions to initializing
+	msg = &jsonrpcMessage{JSONRPC: "2.0", ID: 3, Method: "initialize"}
+	if reject = gateMethod(cs, msg); reject != nil {
+		t.Fatal("initialize should be allowed in connected state")
+	}
+	if cs.get() != stateInitializing {
+		t.Fatal("state should be initializing after initialize")
+	}
+
+	// tools/list still rejected in initializing
+	msg = &jsonrpcMessage{JSONRPC: "2.0", ID: 4, Method: "tools/list"}
+	if reject = gateMethod(cs, msg); reject == nil {
+		t.Fatal("expected rejection for tools/list before notifications/initialized")
+	}
+
+	// notifications/initialized transitions to ready
+	msg = &jsonrpcMessage{JSONRPC: "2.0", Method: "notifications/initialized"}
+	if reject = gateMethod(cs, msg); reject != nil {
+		t.Fatal("notifications/initialized should be allowed in initializing state")
+	}
+	if cs.get() != stateReady {
+		t.Fatal("state should be ready after notifications/initialized")
+	}
+
+	// everything allowed in ready state
+	msg = &jsonrpcMessage{JSONRPC: "2.0", ID: 5, Method: "tools/list"}
+	if reject = gateMethod(cs, msg); reject != nil {
+		t.Fatal("tools/list should be allowed in ready state")
 	}
 }
 

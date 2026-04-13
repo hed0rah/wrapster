@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hed0rah/wrapster/internal/audit"
 	"github.com/hed0rah/wrapster/internal/cache"
@@ -18,12 +19,64 @@ import (
 	"github.com/hed0rah/wrapster/internal/runner"
 )
 
+// connState tracks the MCP connection lifecycle.
+// CONNECTED -> INITIALIZING -> READY
+type connState struct {
+	state atomic.Int32 // 0=connected, 1=initializing, 2=ready
+}
+
+const (
+	stateConnected    int32 = 0
+	stateInitializing int32 = 1
+	stateReady        int32 = 2
+)
+
+func (cs *connState) get() int32           { return cs.state.Load() }
+func (cs *connState) set(s int32)          { cs.state.Store(s) }
+func (cs *connState) isReady() bool        { return cs.state.Load() == stateReady }
+
+// Version is set at build time via ldflags. Falls back to "dev".
+var Version = "dev"
+
+// supportedVersions lists MCP protocol versions this server can speak.
+var supportedVersions = map[string]bool{
+	"2024-11-05": true,
+	"2025-03-26": true,
+}
+
+const defaultVersion = "2024-11-05"
+
+// negotiateVersion returns the client's requested version if we support it,
+// otherwise falls back to the default. Logs a warning to stderr on mismatch.
+func negotiateVersion(clientVersion string) string {
+	if clientVersion == "" {
+		return defaultVersion
+	}
+	if supportedVersions[clientVersion] {
+		return clientVersion
+	}
+	fmt.Fprintf(os.Stderr, "mcp: client requested unsupported protocol version %q, using %s\n", clientVersion, defaultVersion)
+	return defaultVersion
+}
+
 // Serve runs an MCP server over stdio. Blocks until stdin closes.
 func Serve(r *runner.Runner) error {
 	reader := bufio.NewReader(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
 	var encMu sync.Mutex
 	cr := newCancelRegistry()
+	cs := &connState{} // starts at stateConnected
+
+	send := func(resp *jsonrpcResponse) {
+		if resp == nil {
+			return
+		}
+		encMu.Lock()
+		if err := encoder.Encode(resp); err != nil {
+			fmt.Fprintf(os.Stderr, "mcp: write error: %v\n", err)
+		}
+		encMu.Unlock()
+	}
 
 	for {
 		msg, err := readMessage(reader)
@@ -34,6 +87,12 @@ func Serve(r *runner.Runner) error {
 			encMu.Lock()
 			writeError(encoder, nil, -32700, "parse error: "+err.Error())
 			encMu.Unlock()
+			continue
+		}
+
+		// State machine gate: enforce CONNECTED -> INITIALIZING -> READY.
+		if reject := gateMethod(cs, msg); reject != nil {
+			send(reject)
 			continue
 		}
 
@@ -60,28 +119,48 @@ func Serve(r *runner.Runner) error {
 		// Multiple tool calls (e.g. to different SSH hosts) execute in parallel.
 		if msg.Method == "tools/call" {
 			go func(m *jsonrpcMessage) {
-				response := handleMessage(r, m, cr)
-				if response != nil {
-					encMu.Lock()
-					if err := encoder.Encode(response); err != nil {
-						fmt.Fprintf(os.Stderr, "mcp: write error: %v\n", err)
-					}
-					encMu.Unlock()
-				}
+				send(handleMessage(r, m, cr, cs))
 			}(msg)
 			continue
 		}
 
 		// Non-tool-call requests (initialize, tools/list, ping) are fast;
 		// handle synchronously so they don't race with concurrent tool calls.
-		response := handleMessage(r, msg, cr)
-		if response != nil {
-			encMu.Lock()
-			if err := encoder.Encode(response); err != nil {
-				fmt.Fprintf(os.Stderr, "mcp: write error: %v\n", err)
-			}
-			encMu.Unlock()
+		send(handleMessage(r, msg, cr, cs))
+	}
+}
+
+// gateMethod enforces the MCP connection state machine. Returns an error
+// response if the method is not legal in the current state, nil otherwise.
+// Also advances state on initialize and notifications/initialized.
+func gateMethod(cs *connState, msg *jsonrpcMessage) *jsonrpcResponse {
+	state := cs.get()
+
+	switch state {
+	case stateConnected:
+		// only initialize and ping are legal before handshake
+		if msg.Method == "initialize" {
+			cs.set(stateInitializing)
+			return nil
 		}
+		if msg.Method == "ping" {
+			return nil
+		}
+		return respondError(msg.ID, -32600, "server not initialized: send initialize first")
+
+	case stateInitializing:
+		// waiting for notifications/initialized before accepting capability calls
+		if msg.Method == "notifications/initialized" {
+			cs.set(stateReady)
+			return nil
+		}
+		if msg.Method == "ping" {
+			return nil
+		}
+		return respondError(msg.ID, -32600, "server not ready: send notifications/initialized first")
+
+	default: // stateReady
+		return nil
 	}
 }
 
@@ -149,34 +228,21 @@ type initializeResult struct {
 }
 
 type capabilities struct {
-	Tools      *toolsCap  `json:"tools,omitempty"`
-	Extensions *extensions `json:"extensions,omitempty"`
+	Tools        *toolsCap      `json:"tools,omitempty"`
+	Experimental map[string]any `json:"experimental,omitempty"`
 }
 
 type toolsCap struct {
 	ListChanged bool `json:"listChanged"`
 }
 
-// extensions advertises wrapster-specific transport capabilities to the client.
-// Clients that don't understand this field will ignore it. Features guarded by
-// these flags should degrade gracefully when unsupported.
-type extensions struct {
-	// GzipSSE: SSE stream is gzip-compressed when client sends Accept-Encoding: gzip.
-	GzipSSE bool `json:"gzip_sse"`
-	// RequestCancellation: server honours notifications/cancelled to kill in-flight execs.
-	RequestCancellation bool `json:"request_cancellation"`
-	// ConcurrentDispatch: server can process multiple tool calls in parallel (stdio).
-	ConcurrentDispatch bool `json:"concurrent_dispatch"`
-	// OutputHandles: large outputs return a buf_id handle; use get_output to page them.
-	OutputHandles bool `json:"output_handles"`
-}
-
-// serverExtensions is the static extension capability set for this build.
-var serverExtensions = &extensions{
-	GzipSSE:             true,
-	RequestCancellation: true,
-	ConcurrentDispatch:  true,
-	OutputHandles:       true,
+// wrapsterExperimental is the static set of wrapster-specific capabilities
+// advertised under capabilities.experimental.wrapster per MCP spec.
+var wrapsterExperimental = map[string]any{
+	"gzip_sse":             true,
+	"request_cancellation": true,
+	"concurrent_dispatch":  true,
+	"output_handles":       true,
 }
 
 type serverInfo struct {
@@ -196,10 +262,23 @@ type toolsListResult struct {
 }
 
 type toolDef struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema map[string]any  `json:"inputSchema"`
+	Annotations *toolAnnotations `json:"annotations,omitempty"`
 }
+
+// toolAnnotations provides advisory hints per MCP spec. Hosts use these for
+// UI/security decisions but must not rely on them for enforcement.
+type toolAnnotations struct {
+	Title           string `json:"title,omitempty"`
+	ReadOnlyHint    *bool  `json:"readOnlyHint,omitempty"`
+	DestructiveHint *bool  `json:"destructiveHint,omitempty"`
+	IdempotentHint  *bool  `json:"idempotentHint,omitempty"`
+	OpenWorldHint   *bool  `json:"openWorldHint,omitempty"`
+}
+
+func boolPtr(b bool) *bool { return &b }
 
 type callToolParams struct {
 	Name      string         `json:"name"`
@@ -218,18 +297,21 @@ type contentBlock struct {
 
 // Message handling
 
-func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry) *jsonrpcResponse {
+func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry, cs *connState) *jsonrpcResponse {
 	switch msg.Method {
 	case "initialize":
-		// Parse client params for logging; we advertise the same extensions regardless.
 		var params initializeParams
 		if msg.Params != nil {
-			_ = json.Unmarshal(msg.Params, &params) // best-effort; ignore parse errors
+			_ = json.Unmarshal(msg.Params, &params)
 		}
+		version := negotiateVersion(params.ProtocolVersion)
 		return respond(msg.ID, initializeResult{
-			ProtocolVersion: "2024-11-05",
-			Capabilities:    capabilities{Tools: &toolsCap{}, Extensions: serverExtensions},
-			ServerInfo:      serverInfo{Name: "wrapster", Version: "0.1.0"},
+			ProtocolVersion: version,
+			Capabilities: capabilities{
+				Tools:        &toolsCap{},
+				Experimental: map[string]any{"wrapster": wrapsterExperimental},
+			},
+			ServerInfo: serverInfo{Name: "wrapster", Version: Version},
 		})
 
 	case "notifications/initialized":
@@ -267,10 +349,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		command, _ := params.Arguments["command"].(string)
 		nocache, _ := params.Arguments["nocache"].(bool)
 		if command == "" {
-			return respond(id, toolResult{
-				IsError: true,
-				Content: []contentBlock{{Type: "text", Text: "command is required"}},
-			})
+			return respondError(id, -32602, "command is required")
 		}
 
 		if !nocache && r.ResultCache != nil {
@@ -298,10 +377,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		command, _ := params.Arguments["command"].(string)
 		nocache, _ := params.Arguments["nocache"].(bool)
 		if host == "" || command == "" {
-			return respond(id, toolResult{
-				IsError: true,
-				Content: []contentBlock{{Type: "text", Text: "host and command are required"}},
-			})
+			return respondError(id, -32602, "host and command are required")
 		}
 
 		if !nocache && r.ResultCache != nil {
@@ -328,10 +404,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		host, _ := params.Arguments["host"].(string)
 		command, _ := params.Arguments["command"].(string)
 		if host == "" || command == "" {
-			return respond(id, toolResult{
-				IsError: true,
-				Content: []contentBlock{{Type: "text", Text: "host and command are required"}},
-			})
+			return respondError(id, -32602, "host and command are required")
 		}
 
 		result := r.Validate(host, command)
@@ -343,10 +416,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 	case "ssh_list_allowed":
 		host, _ := params.Arguments["host"].(string)
 		if host == "" {
-			return respond(id, toolResult{
-				IsError: true,
-				Content: []contentBlock{{Type: "text", Text: "host is required"}},
-			})
+			return respondError(id, -32602, "host is required")
 		}
 
 		hp := r.ListAllowed(host)
@@ -359,19 +429,13 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		host, _ := params.Arguments["host"].(string)
 		commandsRaw, _ := params.Arguments["commands"].([]any)
 		if host == "" || len(commandsRaw) == 0 {
-			return respond(id, toolResult{
-				IsError: true,
-				Content: []contentBlock{{Type: "text", Text: "host and commands are required"}},
-			})
+			return respondError(id, -32602, "host and commands are required")
 		}
 		commands := make([]string, len(commandsRaw))
 		for i, c := range commandsRaw {
 			s, _ := c.(string)
 			if s == "" {
-				return respond(id, toolResult{
-					IsError: true,
-					Content: []contentBlock{{Type: "text", Text: fmt.Sprintf("commands[%d] is empty or not a string", i)}},
-				})
+				return respondError(id, -32602, fmt.Sprintf("commands[%d] is empty or not a string", i))
 			}
 			commands[i] = s
 		}
@@ -399,7 +463,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		host, _ := params.Arguments["host"].(string)
 		refresh, _ := params.Arguments["refresh"].(bool)
 		if host == "" {
-			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "host is required"}}})
+			return respondError(id, -32602, "host is required")
 		}
 		if r.HostInfoCache == nil {
 			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "host info cache not enabled"}}})
@@ -421,7 +485,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 	case "get_output":
 		bufID, _ := params.Arguments["buf_id"].(string)
 		if bufID == "" {
-			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "buf_id is required"}}})
+			return respondError(id, -32602, "buf_id is required")
 		}
 		if r.BufStore == nil {
 			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "output buffer not enabled"}}})
@@ -448,7 +512,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		bufID, _ := params.Arguments["buf_id"].(string)
 		pattern, _ := params.Arguments["pattern"].(string)
 		if bufID == "" || pattern == "" {
-			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "buf_id and pattern are required"}}})
+			return respondError(id, -32602, "buf_id and pattern are required")
 		}
 		if r.BufStore == nil {
 			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "output buffer not enabled"}}})
@@ -491,7 +555,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		host, _ := params.Arguments["host"].(string)
 		query, _ := params.Arguments["query"].(string)
 		if host == "" || query == "" {
-			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "host and query are required"}}})
+			return respondError(id, -32602, "host and query are required")
 		}
 		searchPath := "."
 		if v, ok := params.Arguments["path"].(string); ok && v != "" {
@@ -525,7 +589,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		host, _ := params.Arguments["host"].(string)
 		pattern, _ := params.Arguments["pattern"].(string)
 		if host == "" || pattern == "" {
-			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: "host and pattern are required"}}})
+			return respondError(id, -32602, "host and pattern are required")
 		}
 		searchPath := "."
 		if v, ok := params.Arguments["path"].(string); ok && v != "" {
@@ -757,6 +821,11 @@ func toolDefinitions() []toolDef {
 				},
 				"required": []string{"command"},
 			},
+			Annotations: &toolAnnotations{
+				Title:           "Run Local Command",
+				DestructiveHint: boolPtr(true),
+				OpenWorldHint:   boolPtr(true),
+			},
 		},
 		{
 			Name:        "ssh_exec",
@@ -779,6 +848,11 @@ func toolDefinitions() []toolDef {
 				},
 				"required": []string{"host", "command"},
 			},
+			Annotations: &toolAnnotations{
+				Title:           "Run Remote Command",
+				DestructiveHint: boolPtr(true),
+				OpenWorldHint:   boolPtr(true),
+			},
 		},
 		{
 			Name:        "ssh_validate",
@@ -797,6 +871,11 @@ func toolDefinitions() []toolDef {
 				},
 				"required": []string{"host", "command"},
 			},
+			Annotations: &toolAnnotations{
+				Title:          "Validate Command",
+				ReadOnlyHint:   boolPtr(true),
+				IdempotentHint: boolPtr(true),
+			},
 		},
 		{
 			Name:        "ssh_list_allowed",
@@ -810,6 +889,11 @@ func toolDefinitions() []toolDef {
 					},
 				},
 				"required": []string{"host"},
+			},
+			Annotations: &toolAnnotations{
+				Title:          "List Allowed Commands",
+				ReadOnlyHint:   boolPtr(true),
+				IdempotentHint: boolPtr(true),
 			},
 		},
 		{
@@ -830,6 +914,11 @@ func toolDefinitions() []toolDef {
 				},
 				"required": []string{"host", "commands"},
 			},
+			Annotations: &toolAnnotations{
+				Title:           "Batch Execute",
+				DestructiveHint: boolPtr(true),
+				OpenWorldHint:   boolPtr(true),
+			},
 		},
 		{
 			Name:        "host_info",
@@ -841,6 +930,11 @@ func toolDefinitions() []toolDef {
 					"refresh": map[string]any{"type": "boolean", "description": "Force re-probe even if cached"},
 				},
 				"required": []string{"host"},
+			},
+			Annotations: &toolAnnotations{
+				Title:          "Host Fingerprint",
+				ReadOnlyHint:   boolPtr(true),
+				IdempotentHint: boolPtr(true),
 			},
 		},
 		{
@@ -855,6 +949,11 @@ func toolDefinitions() []toolDef {
 				},
 				"required": []string{"buf_id"},
 			},
+			Annotations: &toolAnnotations{
+				Title:          "Read Output Buffer",
+				ReadOnlyHint:   boolPtr(true),
+				IdempotentHint: boolPtr(true),
+			},
 		},
 		{
 			Name:        "grep_output",
@@ -867,6 +966,11 @@ func toolDefinitions() []toolDef {
 					"max_lines": map[string]any{"type": "integer", "description": "Max matching lines to return (default 100)"},
 				},
 				"required": []string{"buf_id", "pattern"},
+			},
+			Annotations: &toolAnnotations{
+				Title:          "Search Output Buffer",
+				ReadOnlyHint:   boolPtr(true),
+				IdempotentHint: boolPtr(true),
 			},
 		},
 		{
@@ -885,6 +989,10 @@ func toolDefinitions() []toolDef {
 					},
 				},
 			},
+			Annotations: &toolAnnotations{
+				Title:          "Invalidate Cache",
+				IdempotentHint: boolPtr(true),
+			},
 		},
 		{
 			Name:        "find_files",
@@ -898,6 +1006,11 @@ func toolDefinitions() []toolDef {
 					"max_results": map[string]any{"type": "integer", "description": "Max results to return (default 50)"},
 				},
 				"required": []string{"host", "query"},
+			},
+			Annotations: &toolAnnotations{
+				Title:        "Find Files",
+				ReadOnlyHint: boolPtr(true),
+				OpenWorldHint: boolPtr(true),
 			},
 		},
 		{
@@ -914,6 +1027,11 @@ func toolDefinitions() []toolDef {
 				},
 				"required": []string{"host", "pattern"},
 			},
+			Annotations: &toolAnnotations{
+				Title:         "Search File Contents",
+				ReadOnlyHint:  boolPtr(true),
+				OpenWorldHint: boolPtr(true),
+			},
 		},
 		{
 			Name:        "get_stats",
@@ -921,6 +1039,10 @@ func toolDefinitions() []toolDef {
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
+			},
+			Annotations: &toolAnnotations{
+				Title:        "Session Stats",
+				ReadOnlyHint: boolPtr(true),
 			},
 		},
 	}

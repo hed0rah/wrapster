@@ -49,6 +49,7 @@ type sseSession struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	cancels *cancelRegistry // in-flight tool call cancellations for this session
+	state   *connState      // MCP connection lifecycle for this session
 }
 
 func NewSSEServer(r *runner.Runner, addr string) *SSEServer {
@@ -106,6 +107,7 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		ctx:     ctx,
 		cancel:  cancel,
 		cancels: newCancelRegistry(),
+		state:   &connState{},
 	}
 
 	s.mu.Lock()
@@ -183,12 +185,21 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	msg := &msgVal
 
+	// State machine gate: enforce CONNECTED -> INITIALIZING -> READY.
+	if reject := gateMethod(sess.state, msg); reject != nil {
+		data, _ := json.Marshal(reject)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+		return
+	}
+
 	// Return 202 immediately per spec.
 	w.WriteHeader(http.StatusAccepted)
 
 	// Handle in a goroutine; push response to the SSE stream.
 	go func() {
-		response := handleMessage(s.runner, msg, sess.cancels)
+		response := handleMessage(s.runner, msg, sess.cancels, sess.state)
 		if response != nil {
 			data, err := json.Marshal(response)
 			if err != nil {
