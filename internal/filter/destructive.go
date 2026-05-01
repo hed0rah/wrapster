@@ -15,31 +15,21 @@ func NewDestructive() *DestructiveFilter {
 		severity string
 		desc     string
 	}{
-		// Filesystem destruction
-		{`\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?/`, "destructive", "critical",
-			"rm with force on root path"},
+		// Filesystem destruction. Patterns covered by policy hardDeny
+		// (rm -rf /, mkfs, dd of=/dev/, > /dev/sd*, chmod 777, fork bomb)
+		// are intentionally absent here -- hardDeny runs first and would
+		// have already blocked them, so re-checking on every passing
+		// command is wasted work.
 		{`\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*r`, "destructive", "critical",
 			"recursive force delete"},
-		{`\bmkfs\b`, "destructive", "critical",
-			"filesystem format"},
-		{`\bdd\b.*\bof=/dev/`, "destructive", "critical",
-			"dd write to device"},
-		{`>\s*/dev/sd[a-z]`, "destructive", "critical",
-			"redirect to raw disk"},
 		{`\bshred\b`, "destructive", "high",
 			"secure file destruction"},
 		{`\bwipefs\b`, "destructive", "critical",
 			"wipe filesystem signatures"},
 
-		// Permissions
-		{`\bchmod\s+.*777\b`, "destructive", "high",
-			"world-writable permissions"},
+		// Permissions (chmod 777 handled by hardDeny)
 		{`\bchmod\s+.*a\+[rwx]`, "destructive", "high",
 			"adding permissions for all users"},
-
-		// Fork bomb
-		{`:\(\)\s*\{\s*:\|:&\s*\}\s*;:`, "destructive", "critical",
-			"fork bomb"},
 
 		// SQL destructive operations
 		{`\bDROP\s+(TABLE|DATABASE|SCHEMA|INDEX)\b`, "destructive", "critical",

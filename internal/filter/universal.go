@@ -76,10 +76,7 @@ func compileUniversal() []rule {
 			"socket connect (reverse shell indicator)"},
 
 		// === DATA EXFILTRATION ===
-		{`\bcurl\b.*\|\s*(sh|bash)`, "download", "critical",
-			"curl pipe to shell (remote code execution)"},
-		{`\bwget\b.*\|\s*(sh|bash)`, "download", "critical",
-			"wget pipe to shell (remote code execution)"},
+		// curl|sh and wget|sh are handled by policy hardDeny; not duplicated here.
 		{`\bhttp\.server\b`, "upload", "high",
 			"Python HTTP server (potential data exfil)"},
 		{`SimpleHTTPServer`, "upload", "high",
@@ -92,10 +89,8 @@ func compileUniversal() []rule {
 			"setreuid call"},
 
 		// === SENSITIVE FILE ACCESS ===
-		{`/etc/shadow`, "file-read", "high",
-			"access to /etc/shadow"},
-		{`/etc/sudoers`, "file-read", "high",
-			"access to /etc/sudoers"},
+		// /etc/shadow and /etc/sudoers covered by policy hardDeny
+		// (/etc/(passwd|shadow|sudoers)); not duplicated here.
 		{`\.ssh/id_(rsa|dsa|ecdsa|ed25519)`, "file-read", "high",
 			"access to SSH private keys"},
 		{`authorized_keys`, "file-write", "critical",

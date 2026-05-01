@@ -75,12 +75,16 @@ func (s Stats) SavingsPct() float64 {
 }
 
 // ansiPattern matches ANSI escape sequences: CSI sequences, OSC sequences,
-// and simple two-byte escapes.
+// and simple two-byte escapes. Only consulted when StripANSI's byte-scan
+// finds an ESC (0x1b); clean output skips the regex entirely.
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b[=><78HMND]`)
 
 // StripANSI removes ANSI escape sequences from s without applying any other
 // transformations. Exported for use by the buf-store layer.
 func StripANSI(s string) string {
+	if strings.IndexByte(s, 0x1b) < 0 {
+		return s
+	}
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
@@ -90,7 +94,7 @@ func Process(raw string, cfg Config) string {
 	out := raw
 
 	if cfg.ANSIStrip {
-		out = ansiPattern.ReplaceAllString(out, "")
+		out = StripANSI(out)
 	}
 
 	if cfg.Truncate.Enabled && len(out) > cfg.Truncate.MaxChars {
@@ -100,37 +104,70 @@ func Process(raw string, cfg Config) string {
 	return out
 }
 
-// truncate keeps head and tail lines, drops the middle.
+// truncate keeps head and tail lines, drops the middle. Walks the string
+// byte-by-byte to find newline offsets so it never allocates a per-line
+// substring header for the body it is about to discard.
 func truncate(s string, cfg TruncateConfig) string {
-	lines := strings.Split(s, "\n")
-	total := len(lines)
-
 	head := cfg.HeadLines
 	tail := cfg.TailLines
 
-	// if the line count fits within head+tail, no truncation needed
-	if total <= head+tail {
-		return s
+	// Ring buffer holds byte offsets of the last (tail+1) newlines seen.
+	// Sized to tail+1 so the oldest slot points to the newline that begins
+	// the tail section once the ring is full.
+	var ring []int
+	if tail > 0 {
+		ring = make([]int, tail+1)
+	}
+	ringIdx := 0
+	ringFilled := 0
+
+	newlineCount := 0
+	headEnd := -1
+	if head == 0 {
+		headEnd = 0
 	}
 
-	var b strings.Builder
-
-	// write head
-	for i := 0; i < head && i < total; i++ {
-		b.WriteString(lines[i])
-		b.WriteByte('\n')
-	}
-
-	omitted := total - head - tail
-	b.WriteString(fmt.Sprintf("\n... %d lines omitted ...\n\n", omitted))
-
-	// write tail
-	for i := total - tail; i < total; i++ {
-		b.WriteString(lines[i])
-		if i < total-1 {
-			b.WriteByte('\n')
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\n' {
+			continue
+		}
+		newlineCount++
+		if newlineCount == head {
+			headEnd = i + 1
+		}
+		if tail > 0 {
+			ring[ringIdx] = i
+			ringIdx++
+			if ringIdx == len(ring) {
+				ringIdx = 0
+			}
+			if ringFilled < len(ring) {
+				ringFilled++
+			}
 		}
 	}
 
+	// strings.Split(s, "\n") returns newlineCount+1 entries, so match that.
+	lineCount := newlineCount + 1
+	if lineCount <= head+tail || headEnd < 0 {
+		return s
+	}
+
+	tailStart := len(s)
+	if tail > 0 && ringFilled == len(ring) {
+		// Oldest entry sits at ringIdx (next-write slot). Tail content
+		// begins immediately after that newline.
+		tailStart = ring[ringIdx] + 1
+	}
+
+	omitted := lineCount - head - tail
+	headSlice := s[:headEnd]
+	tailSlice := s[tailStart:]
+
+	var b strings.Builder
+	b.Grow(len(headSlice) + len(tailSlice) + 32)
+	b.WriteString(headSlice)
+	fmt.Fprintf(&b, "\n... %d lines omitted ...\n\n", omitted)
+	b.WriteString(tailSlice)
 	return b.String()
 }
