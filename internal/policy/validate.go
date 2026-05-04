@@ -38,18 +38,41 @@ const (
 // Shell metacharacters that enable injection when unsanitized.
 var shellOperatorPattern = regexp.MustCompile(`[;|&` + "`" + `$(){}]|&&|\|\|`)
 
-// Dangerous patterns that are always denied regardless of policy or mode.
-var hardDenyPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?/`),          // rm -rf /
-	regexp.MustCompile(`>\s*/dev/sd[a-z]`),                               // write to raw disk
-	regexp.MustCompile(`\bdd\s+.*of=/dev/`),                              // dd to device
-	regexp.MustCompile(`\bmkfs\b`),                                       // format filesystem
-	regexp.MustCompile(`\b:(){ :\|:& };:`),                               // fork bomb
-	regexp.MustCompile(`/etc/(passwd|shadow|sudoers)`),                   // sensitive files
-	regexp.MustCompile(`\bchmod\s+.*777\b`),                              // world-writable
-	regexp.MustCompile(`\bcurl\b.*\|\s*(ba)?sh`),                         // curl | sh
-	regexp.MustCompile(`\bwget\b.*\|\s*(ba)?sh`),                         // wget | sh
+// hardDenyRule pairs a raw pattern (for error messages) with its compiled
+// form (used only on the slow path when the fused regex below has already
+// confirmed a match).
+type hardDenyRule struct {
+	raw string
+	re  *regexp.Regexp
 }
+
+// Dangerous patterns that are always denied regardless of policy or mode.
+// Kept as individual rules so the deny reason can name the specific pattern
+// that triggered, but only consulted when hardDenyFused has matched.
+var hardDenyRules = []hardDenyRule{
+	{raw: `\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?/`},     // rm -rf /
+	{raw: `>\s*/dev/sd[a-z]`},                        // write to raw disk
+	{raw: `\bdd\b.*of=/dev/`},                        // dd to device
+	{raw: `\bmkfs\b`},                                // format filesystem
+	{raw: `:\(\)\s*\{\s*:\|:&\s*\}\s*;:`},            // fork bomb
+	{raw: `/etc/(passwd|shadow|sudoers)`},            // sensitive files
+	{raw: `\bchmod\s+.*777\b`},                       // world-writable
+	{raw: `\bcurl\b.*\|\s*(ba)?sh`},                  // curl | sh
+	{raw: `\bwget\b.*\|\s*(ba)?sh`},                  // wget | sh
+}
+
+// hardDenyFused alternates every hardDenyRule pattern so a single DFA pass
+// answers "does any dangerous pattern match?" instead of running 9 sequential
+// MatchString calls. The slow-path lookup over hardDenyRules only runs when
+// this match is positive (a rare path).
+var hardDenyFused = func() *regexp.Regexp {
+	parts := make([]string, len(hardDenyRules))
+	for i := range hardDenyRules {
+		hardDenyRules[i].re = regexp.MustCompile(hardDenyRules[i].raw)
+		parts[i] = "(?:" + hardDenyRules[i].raw + ")"
+	}
+	return regexp.MustCompile(strings.Join(parts, "|"))
+}()
 
 // ValidationResult holds the outcome of command validation.
 type ValidationResult struct {
@@ -69,12 +92,19 @@ func ValidateCommand(cmd string, hp HostPolicy, mode ValidationMode) ValidationR
 	}
 
 	// Hard denies -- always blocked, no override, regardless of mode.
-	for _, pat := range hardDenyPatterns {
-		if pat.MatchString(cmd) {
-			return ValidationResult{
-				Allowed: false,
-				Reason:  fmt.Sprintf("hard-denied: matches dangerous pattern %q", pat.String()),
+	// One fused DFA pass replaces N sequential matches; only when it hits
+	// do we walk the rules to identify which pattern triggered.
+	if hardDenyFused.MatchString(cmd) {
+		matched := "dangerous pattern"
+		for i := range hardDenyRules {
+			if hardDenyRules[i].re.MatchString(cmd) {
+				matched = hardDenyRules[i].raw
+				break
 			}
+		}
+		return ValidationResult{
+			Allowed: false,
+			Reason:  fmt.Sprintf("hard-denied: matches dangerous pattern %q", matched),
 		}
 	}
 
