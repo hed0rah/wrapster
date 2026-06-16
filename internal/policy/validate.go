@@ -36,7 +36,27 @@ const (
 )
 
 // Shell metacharacters that enable injection when unsanitized.
-var shellOperatorPattern = regexp.MustCompile(`[;|&` + "`" + `$(){}]|&&|\|\|`)
+var shellOperatorPattern = regexp.MustCompile(`[;|&` + "`" + `$(){}<>\r\n]|&&|\|\|`)
+
+// segmentSplitter splits a command on shell control operators so each segment
+// can be validated independently in allowlist mode.
+var segmentSplitter = regexp.MustCompile(`(?:&&|\|\||[;|&\n\r])`)
+
+// cmdSubstPattern detects command/process substitution, which is rejected in
+// allowlist mode because it hides an un-validated sub-command.
+var cmdSubstPattern = regexp.MustCompile(`\$\(|` + "`" + `|<\(|>\(`)
+
+// splitSegments returns the non-empty, trimmed operator-separated segments of cmd.
+func splitSegments(cmd string) []string {
+	parts := segmentSplitter.Split(cmd, -1)
+	out := parts[:0]
+	for _, s := range parts {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
 
 // hardDenyRule pairs a raw pattern (for error messages) with its compiled
 // form (used only on the slow path when the fused regex below has already
@@ -50,15 +70,16 @@ type hardDenyRule struct {
 // Kept as individual rules so the deny reason can name the specific pattern
 // that triggered, but only consulted when hardDenyFused has matched.
 var hardDenyRules = []hardDenyRule{
-	{raw: `\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?/`},     // rm -rf /
-	{raw: `>\s*/dev/sd[a-z]`},                        // write to raw disk
-	{raw: `\bdd\b.*of=/dev/`},                        // dd to device
-	{raw: `\bmkfs\b`},                                // format filesystem
-	{raw: `:\(\)\s*\{\s*:\|:&\s*\}\s*;:`},            // fork bomb
-	{raw: `/etc/(passwd|shadow|sudoers)`},            // sensitive files
-	{raw: `\bchmod\s+.*777\b`},                       // world-writable
-	{raw: `\bcurl\b.*\|\s*(ba)?sh`},                  // curl | sh
-	{raw: `\bwget\b.*\|\s*(ba)?sh`},                  // wget | sh
+	{raw: `\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+){1,4}/`},                         // rm -rf / (any short-flag order)
+	{raw: `\brm\b.*\s--(recursive|force)\b.*\s/`},                              // rm --recursive/--force ... /
+	{raw: `>\s*/dev/(sd[a-z]|nvme\d+n\d+|vd[a-z]|xvd[a-z]|mmcblk\d+|mapper/)`}, // write to raw disk
+	{raw: `\bdd\b.*\bof\s*=\s*/dev/`},                                          // dd to device
+	{raw: `\bmkfs\b`},                                                          // format filesystem
+	{raw: `:\(\)\s*\{\s*:\|:&\s*\}\s*;:`},                                      // fork bomb
+	{raw: `/etc/(passwd|shadow|sudoers)`},                                      // sensitive files
+	{raw: `\bchmod\s+.*777\b`},                                                 // world-writable (octal)
+	{raw: `\bchmod\s+.*[oa]\+w`},                                               // world-writable (symbolic)
+	{raw: `\b(curl|wget|fetch)\b.*\|\s*(sudo\s+)?(sh|bash|dash|zsh|ksh|fish|python[0-9.]*|perl|ruby|node)\b`}, // download | interpreter
 }
 
 // hardDenyFused alternates every hardDenyRule pattern so a single DFA pass
@@ -68,10 +89,10 @@ var hardDenyRules = []hardDenyRule{
 var hardDenyFused = func() *regexp.Regexp {
 	parts := make([]string, len(hardDenyRules))
 	for i := range hardDenyRules {
-		hardDenyRules[i].re = regexp.MustCompile(hardDenyRules[i].raw)
+		hardDenyRules[i].re = regexp.MustCompile("(?i)" + hardDenyRules[i].raw)
 		parts[i] = "(?:" + hardDenyRules[i].raw + ")"
 	}
-	return regexp.MustCompile(strings.Join(parts, "|"))
+	return regexp.MustCompile("(?i)" + strings.Join(parts, "|"))
 }()
 
 // ValidationResult holds the outcome of command validation.
@@ -112,7 +133,7 @@ func ValidateCommand(cmd string, hp HostPolicy, mode ValidationMode) ValidationR
 	if !hp.AllowShellOperators && shellOperatorPattern.MatchString(cmd) {
 		return ValidationResult{
 			Allowed: false,
-			Reason:  "shell operators (;|&`$(){}) are not allowed -- set allow_shell_operators: true in policy to permit",
+			Reason:  "shell operators, redirects, or newlines are not allowed -- set allow_shell_operators: true in policy to permit",
 		}
 	}
 
@@ -143,9 +164,20 @@ func ValidateCommand(cmd string, hp HostPolicy, mode ValidationMode) ValidationR
 	}
 
 	// Allowlist mode -- must match at least one rule.
+	// Command substitution can smuggle an un-allowlisted sub-command inside an
+	// allowed one and cannot be validated per-segment, so reject it outright.
+	if cmdSubstPattern.MatchString(cmd) {
+		return ValidationResult{
+			Allowed: false,
+			Reason:  "command substitution ($(), backticks, process substitution) is not allowed in allowlist mode",
+		}
+	}
+
+	// A Pattern rule is matched against the full command string verbatim
+	// (operators and all), so honor those before splitting into segments.
 	for i := range hp.AllowedCommands {
 		rule := &hp.AllowedCommands[i]
-		if rule.Matches(cmd) {
+		if rule.compiled != nil && rule.Matches(cmd) {
 			return ValidationResult{
 				Allowed:     true,
 				Reason:      fmt.Sprintf("matched rule: %s", ruleLabel(rule)),
@@ -154,9 +186,38 @@ func ValidateCommand(cmd string, hp HostPolicy, mode ValidationMode) ValidationR
 		}
 	}
 
+	// Otherwise every operator-separated segment must independently match an
+	// allowed_commands rule. This stops an allowlisted prefix (e.g. "uptime")
+	// from dragging trailing commands through when allow_shell_operators is on.
+	segments := splitSegments(cmd)
+	if len(segments) == 0 {
+		return ValidationResult{Allowed: false, Reason: "no matching allowed_commands rule (deny by default)"}
+	}
+	var firstRule *CommandRule
+	for _, seg := range segments {
+		matched := false
+		for i := range hp.AllowedCommands {
+			rule := &hp.AllowedCommands[i]
+			if rule.Matches(seg) {
+				matched = true
+				if firstRule == nil {
+					firstRule = rule
+				}
+				break
+			}
+		}
+		if !matched {
+			return ValidationResult{
+				Allowed: false,
+				Reason:  fmt.Sprintf("no matching allowed_commands rule for segment %q (deny by default)", seg),
+			}
+		}
+	}
+
 	return ValidationResult{
-		Allowed: false,
-		Reason:  "no matching allowed_commands rule (deny by default)",
+		Allowed:     true,
+		Reason:      fmt.Sprintf("all %d segment(s) matched allowed_commands", len(segments)),
+		MatchedRule: firstRule,
 	}
 }
 

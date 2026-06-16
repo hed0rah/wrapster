@@ -34,6 +34,43 @@ type OutputTruncateConfig struct {
 	TailLines int  `yaml:"tail_lines"`
 }
 
+// Duration is a time.Duration that round-trips through YAML as a human string
+// like "30s". yaml.v3 has no native time.Duration support -- it emits raw
+// nanoseconds and fails to parse "30s" -- so a named type with custom
+// (un)marshalling is required for the documented policy format to both load and
+// be re-emitted by the config wizard.
+type Duration time.Duration
+
+// Std returns the value as a standard library time.Duration.
+func (d Duration) Std() time.Duration { return time.Duration(d) }
+
+func (d Duration) MarshalYAML() (any, error) {
+	return time.Duration(d).String(), nil
+}
+
+func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
+	var s string
+	if err := node.Decode(&s); err == nil {
+		if s == "" {
+			*d = 0
+			return nil
+		}
+		parsed, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", s, err)
+		}
+		*d = Duration(parsed)
+		return nil
+	}
+	// Fall back to a bare number (nanoseconds), matching yaml.v3's raw form.
+	var n int64
+	if err := node.Decode(&n); err != nil {
+		return fmt.Errorf(`duration must be a string like "30s" or a number of nanoseconds`)
+	}
+	*d = Duration(n)
+	return nil
+}
+
 // LocalConfig governs local command execution (the "exec" MCP tool).
 type LocalConfig struct {
 	// Mode: "guardrail" (default) allows everything unless filters catch it.
@@ -53,7 +90,7 @@ type LocalConfig struct {
 	// Environment vars injected into local commands.
 	Environment map[string]string `yaml:"environment"`
 
-	Timeout        time.Duration `yaml:"timeout"`
+	Timeout        Duration      `yaml:"timeout,omitempty"`
 	MaxOutputBytes int           `yaml:"max_output_bytes"`
 }
 
@@ -94,7 +131,7 @@ type HostPolicy struct {
 
 	// Execution limits
 	MaxOutputBytes int           `yaml:"max_output_bytes"`
-	Timeout        time.Duration `yaml:"timeout"`
+	Timeout        Duration      `yaml:"timeout,omitempty"`
 
 	// shell injection protection -- set to true to allow pipes, semicolons, etc.
 	AllowShellOperators bool `yaml:"allow_shell_operators"`
@@ -250,7 +287,16 @@ func compileRules(hp *HostPolicy) error {
 
 // ResolvedPolicy merges defaults with host-specific overrides.
 func (p *Policy) ResolvedPolicy(host string) HostPolicy {
+	// Start from the defaults, but deep-copy every reference-typed field so a
+	// resolved policy never aliases -- and never mutates -- the shared defaults.
+	// ResolvedPolicy runs concurrently on the MCP dispatch path, so the merges
+	// below must not race on shared maps/slices or bleed one host's rules into
+	// another's.
 	resolved := p.Defaults
+	resolved.SSHOptions = copyStringMap(p.Defaults.SSHOptions)
+	resolved.Environment = copyStringMap(p.Defaults.Environment)
+	resolved.AllowedCommands = append([]CommandRule(nil), p.Defaults.AllowedCommands...)
+	resolved.DeniedPatterns = append([]string(nil), p.Defaults.DeniedPatterns...)
 
 	hp, ok := p.Hosts[host]
 	if !ok {
@@ -304,4 +350,16 @@ func (p *Policy) ResolvedPolicy(host string) HostPolicy {
 	resolved.DeniedPatterns = append(resolved.DeniedPatterns, hp.DeniedPatterns...)
 
 	return resolved
+}
+
+// copyStringMap returns a shallow copy of m, or nil if m is nil.
+func copyStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }

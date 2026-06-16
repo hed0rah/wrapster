@@ -107,10 +107,9 @@ func compileUniversal() []rule {
 
 	rules := make([]rule, 0, len(defs))
 	for _, d := range defs {
-		re, err := regexp.Compile("(?i)" + d.pattern)
-		if err != nil {
-			continue
-		}
+		// Compile-time constant patterns: fail loudly on a bad one rather than
+		// silently dropping a security rule.
+		re := regexp.MustCompile("(?i)" + d.pattern)
 		rules = append(rules, rule{
 			function: d.function,
 			pattern:  re,

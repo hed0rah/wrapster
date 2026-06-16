@@ -20,6 +20,7 @@ import (
 	"github.com/hed0rah/wrapster/internal/policy"
 	"github.com/hed0rah/wrapster/internal/runner"
 	"github.com/hed0rah/wrapster/internal/ssh"
+	"github.com/hed0rah/wrapster/internal/wizard"
 )
 
 const usage = `wrapster -- secure command gateway for LLMs
@@ -29,6 +30,7 @@ Usage:
   wrapster [flags] local <command>        Local exec (guardrail mode)
 
 Modes:
+  wrapster config                         Interactive TUI config wizard (alias: setup)
   wrapster --mcp                          MCP server over stdio
   wrapster --mcp-sse :8080                MCP server over HTTP SSE
   wrapster --watch 30s <host> <cmd>       Poll a command on an interval
@@ -76,6 +78,24 @@ type config struct {
 }
 
 func main() {
+	// `config` / `setup` are reserved first words (like the `local` host) that
+	// launch the interactive wizard; intercept before the flag parser treats
+	// them as a host.
+	if args := os.Args[1:]; len(args) > 0 && (args[0] == "config" || args[0] == "setup") {
+		policyPath := ""
+		rest := args[1:]
+		for i := 0; i < len(rest); i++ {
+			if (rest[i] == "-p" || rest[i] == "--policy") && i+1 < len(rest) {
+				policyPath = rest[i+1]
+				i++
+			}
+		}
+		if err := wizard.Run(wizard.Options{PolicyPath: policyPath}); err != nil {
+			fatal("config", err)
+		}
+		return
+	}
+
 	cfg, err := parseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n\n%s", err, usage)

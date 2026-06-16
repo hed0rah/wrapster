@@ -13,6 +13,14 @@ GOOS=linux GOARCH=arm GOARM=7 go build -o wrapster ./cmd/wrapster
 GOOS=darwin GOARCH=arm64 go build -o wrapster ./cmd/wrapster
 ```
 
+## Config wizard
+
+`wrapster config` (alias `wrapster setup`) launches an interactive TUI that authors a policy.yaml with a live preview and registers the wrapster binary into the MCP clients detected on the machine. Registration merges into each client's existing config without clobbering it; a timestamped .bak is written first.
+
+Supported clients: Claude Desktop, Claude Code, Cursor, Windsurf, Cline, VS Code, LM Studio.
+
+The wizard adds charmbracelet/bubbletea, bubbles, lipgloss, huh plus natefinch/atomic as dependencies. All are statically linked, so the binary remains a single static file with zero runtime dependencies.
+
 ## Policy
 
 Policy is loaded from `./policy.yaml`, then `~/.config/wrapster/policy.yaml`, or `-p <path>`. See `policy.example.yaml` for a full reference.

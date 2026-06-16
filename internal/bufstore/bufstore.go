@@ -1,7 +1,7 @@
 // Package bufstore provides an in-memory ring buffer for full command output.
 // When output is truncated before being sent to the model, the pre-truncation
 // version is stored here and addressable via a short handle (buf_id).
-// The model can page through the full content with get_output / grep_output.
+// The model can page through the full content via the buf:// resource or grep_output.
 package bufstore
 
 import (
@@ -78,11 +78,11 @@ func (s *Store) Slice(id string, offset, length int) string {
 	if offset < 0 {
 		offset = 0
 	}
-	if offset >= len(content) {
+	if length < 0 || offset >= len(content) {
 		return ""
 	}
 	end := offset + length
-	if end > len(content) {
+	if end < offset || end > len(content) { // integer overflow or past end
 		end = len(content)
 	}
 	return content[offset:end]
@@ -117,6 +117,10 @@ func (s *Store) Grep(id, pattern string, maxLines int) ([]string, error) {
 
 func newID() string {
 	b := make([]byte, 4)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failure is catastrophic and essentially never happens on
+		// supported platforms; a zero-value ID would alias buffers, so fail hard.
+		panic("bufstore: crypto/rand unavailable: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }

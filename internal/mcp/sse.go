@@ -227,6 +227,10 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 func generateSessionID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// A zero-value session ID would let any client hijack the session;
+		// crypto/rand failure is catastrophic and effectively never happens.
+		panic("sse: crypto/rand unavailable: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }

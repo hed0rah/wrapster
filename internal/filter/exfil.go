@@ -6,6 +6,14 @@ import (
 	"strings"
 )
 
+// External-destination patterns. These replace negative-lookahead rules (which
+// RE2 silently dropped); the captured host is post-filtered via isLocalHost.
+var (
+	urlDestPattern = regexp.MustCompile(`(?i)\b(?:curl|wget|fetch)\b[^|;&\n]*?\bhttps?://([^/\s'"]+)`)
+	sshDestPattern = regexp.MustCompile(`(?i)\b(?:scp|rsync)\b[^|;&\n]*?\s[^\s'"]*@([^:/\s'"]+)`)
+	dnsTxtPattern  = regexp.MustCompile(`(?i)\bdig\b[^|;&\n]*\bTXT\b[^|;&\n]*@([^\s'"]+)`)
+)
+
 // ExfilFilter detects data exfiltration attempts: outbound transfers
 // to non-local IPs, HTTP server spawning, DNS tunneling indicators.
 type ExfilFilter struct {
@@ -20,15 +28,9 @@ func NewExfil() *ExfilFilter {
 		severity string
 		desc     string
 	}{
-		// HTTP/FTP outbound from common tools
-		{`\bcurl\b.*https?://(?!127\.|localhost|0\.0\.0\.0)`, "exfil", "high",
-			"curl to external URL"},
-		{`\bwget\b.*https?://(?!127\.|localhost|0\.0\.0\.0)`, "exfil", "high",
-			"wget to external URL"},
-		{`\bscp\b.*@(?!127\.|localhost)`, "exfil", "high",
-			"scp to external host"},
-		{`\brsync\b.*@(?!127\.|localhost)`, "exfil", "high",
-			"rsync to external host"},
+		// HTTP/FTP outbound from common tools. External-URL/host detection for
+		// curl/wget/scp/rsync is done in Scan (urlDestPattern/sshDestPattern)
+		// because RE2 has no negative lookahead.
 		{`\bftp\b`, "exfil", "medium",
 			"FTP usage"},
 
@@ -50,9 +52,8 @@ func NewExfil() *ExfilFilter {
 		{`\bruby\b.*-run.*httpd`, "exfil", "high",
 			"Ruby HTTP server"},
 
-		// DNS tunneling indicators
-		{`\bdig\b.*TXT.*@(?!127\.|localhost)`, "exfil", "high",
-			"DNS TXT query (potential DNS tunneling)"},
+		// DNS tunneling indicators. The dig TXT external-resolver case is handled
+		// in Scan (dnsTxtPattern); RE2 cannot express the negative lookahead.
 		{`\bnslookup\b.*-type=TXT`, "exfil", "medium",
 			"nslookup TXT query"},
 
@@ -65,10 +66,7 @@ func NewExfil() *ExfilFilter {
 		ipPat: regexp.MustCompile(`\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b`),
 	}
 	for _, d := range defs {
-		re, err := regexp.Compile("(?i)" + d.pattern)
-		if err != nil {
-			continue
-		}
+		re := regexp.MustCompile("(?i)" + d.pattern)
 		f.rules = append(f.rules, rule{
 			function: d.function,
 			pattern:  re,
@@ -92,6 +90,28 @@ func (f *ExfilFilter) Scan(command string) []Finding {
 				Pattern:  r.rawPat,
 				Detail:   r.detail,
 				Severity: r.severity,
+			})
+		}
+	}
+
+	// External-destination detection (replaces the old negative-lookahead rules
+	// that RE2 silently dropped): match tool + destination, then post-filter
+	// local hosts in code.
+	for _, dc := range []struct {
+		re     *regexp.Regexp
+		detail string
+	}{
+		{urlDestPattern, "outbound transfer to external URL"},
+		{sshDestPattern, "scp/rsync to external host"},
+		{dnsTxtPattern, "DNS TXT query to external resolver (possible tunneling)"},
+	} {
+		if m := dc.re.FindStringSubmatch(command); m != nil && !isLocalHost(m[1]) {
+			findings = append(findings, Finding{
+				Module:   "exfil",
+				Function: "exfil",
+				Pattern:  dc.re.String(),
+				Detail:   dc.detail + ": " + m[1],
+				Severity: "high",
 			})
 		}
 	}
@@ -132,15 +152,26 @@ func isLocalIP(ipStr string) bool {
 	if ip == nil {
 		return false
 	}
-	locals := []string{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "0.0.0.0/32"}
-	for _, cidr := range locals {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		if network.Contains(ip) {
-			return true
-		}
+	// Covers IPv4 and IPv6 loopback, RFC1918 / ULA private ranges, unspecified
+	// (0.0.0.0 / ::), and link-local. RFC1918 is treated as local to avoid
+	// flagging routine internal administration.
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsLinkLocalUnicast()
+}
+
+// isLocalHost reports whether a URL/scp host component refers to the local
+// machine or a private host (so it is not flagged as exfiltration).
+func isLocalHost(host string) bool {
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	// strip a :port suffix for host:port (but not for bare IPv6 literals)
+	if strings.Count(host, ":") == 1 {
+		host = host[:strings.Index(host, ":")]
 	}
-	return false
+	switch host {
+	case "", "localhost", "127.0.0.1", "0.0.0.0", "::1":
+		return true
+	}
+	if net.ParseIP(host) != nil {
+		return isLocalIP(host)
+	}
+	return strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".localhost")
 }

@@ -182,22 +182,31 @@ func gateMethod(cs *connState, msg *jsonrpcMessage) *jsonrpcResponse {
 // Safe for concurrent use by the read loop and goroutine-dispatched handlers.
 type cancelRegistry struct {
 	mu      sync.Mutex
-	cancels map[any]context.CancelFunc
+	cancels map[string]context.CancelFunc
 }
 
 func newCancelRegistry() *cancelRegistry {
-	return &cancelRegistry{cancels: make(map[any]context.CancelFunc)}
+	return &cancelRegistry{cancels: make(map[string]context.CancelFunc)}
+}
+
+// idKey canonicalizes a JSON-RPC id into a type-tagged string so that, e.g.,
+// the string "1" and the number 1 never collide in the registry.
+func idKey(id any) string {
+	if id == nil {
+		return "null"
+	}
+	return fmt.Sprintf("%T:%v", id, id)
 }
 
 func (cr *cancelRegistry) register(id any, cancel context.CancelFunc) {
 	cr.mu.Lock()
-	cr.cancels[id] = cancel
+	cr.cancels[idKey(id)] = cancel
 	cr.mu.Unlock()
 }
 
 func (cr *cancelRegistry) cancel(id any) bool {
 	cr.mu.Lock()
-	fn, ok := cr.cancels[id]
+	fn, ok := cr.cancels[idKey(id)]
 	cr.mu.Unlock()
 	if ok {
 		fn()
@@ -207,7 +216,7 @@ func (cr *cancelRegistry) cancel(id any) bool {
 
 func (cr *cancelRegistry) deregister(id any) {
 	cr.mu.Lock()
-	delete(cr.cancels, id)
+	delete(cr.cancels, idKey(id))
 	cr.mu.Unlock()
 }
 
@@ -691,11 +700,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		if stderr != "" {
 			out += "\n--- stderr ---\n" + strings.TrimRight(stderr, "\n")
 		}
-		if len(out) > 4096 && r.BufStore != nil {
-			bufID := r.BufStore.Put(out)
-			out = fmt.Sprintf("// truncated -- buf_id=%s total=%d\n%s\n[...%d bytes remaining, use get_output]",
-				bufID, r.BufStore.Len(bufID), out[:4096], r.BufStore.Len(bufID)-4096)
-		}
+		out = truncateForModel(out, r)
 		return respond(id, toolResult{Content: []contentBlock{{Type: "text", Text: out}}})
 
 	case "grep_files":
@@ -726,11 +731,7 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		if stderr != "" {
 			out += "\n--- stderr ---\n" + strings.TrimRight(stderr, "\n")
 		}
-		if len(out) > 4096 && r.BufStore != nil {
-			bufID := r.BufStore.Put(out)
-			out = fmt.Sprintf("// truncated -- buf_id=%s total=%d\n%s\n[...%d bytes remaining, use get_output]",
-				bufID, r.BufStore.Len(bufID), out[:4096], r.BufStore.Len(bufID)-4096)
-		}
+		out = truncateForModel(out, r)
 		return respond(id, toolResult{Content: []contentBlock{{Type: "text", Text: out}}})
 
 	default:
@@ -889,6 +890,24 @@ func shellQuote(s string) string {
 
 // findFilesCmd builds a shell command that searches for filenames matching query
 // under path. Tries fd first (faster, respects .gitignore), falls back to find.
+// truncateForModel stores oversized output in the buffer store and returns a
+// model-facing preview trimmed to a UTF-8 boundary, pointing at the buf://
+// resource for the remainder.
+func truncateForModel(out string, r *runner.Runner) string {
+	const previewMax = 4096
+	if len(out) <= previewMax || r.BufStore == nil {
+		return out
+	}
+	bufID := r.BufStore.Put(out)
+	total := r.BufStore.Len(bufID)
+	cut := previewMax
+	for cut > 0 && out[cut]&0xC0 == 0x80 { // back off any UTF-8 continuation byte
+		cut--
+	}
+	return fmt.Sprintf("// truncated -- buf_id=%s total=%d\n%s\n[...%d bytes remaining, read resource buf://%s]",
+		bufID, total, out[:cut], total-cut, bufID)
+}
+
 func findFilesCmd(query, path string, maxResults int) string {
 	q := shellQuote(query)
 	p := shellQuote(path)

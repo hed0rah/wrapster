@@ -2,6 +2,13 @@ package filter
 
 import "regexp"
 
+// SQL DELETE without a WHERE clause is detected in Scan because RE2 has no
+// negative lookahead.
+var (
+	deleteFromPattern  = regexp.MustCompile(`(?i)\bDELETE\s+FROM\b`)
+	whereClausePattern = regexp.MustCompile(`(?i)\bWHERE\b`)
+)
+
 // DestructiveFilter catches commands that destroy data, corrupt filesystems,
 // or make irreversible changes.
 type DestructiveFilter struct {
@@ -38,8 +45,6 @@ func NewDestructive() *DestructiveFilter {
 			"SQL TRUNCATE"},
 		{`\bDELETE\s+FROM\b.*\bWHERE\s+1\s*=\s*1`, "destructive", "critical",
 			"SQL DELETE all rows"},
-		{`\bDELETE\s+FROM\b(?!.*\bWHERE\b)`, "destructive", "high",
-			"SQL DELETE without WHERE clause"},
 		{`\bALTER\s+TABLE\b.*\bDROP\b`, "destructive", "high",
 			"SQL ALTER TABLE DROP column"},
 
@@ -68,10 +73,9 @@ func NewDestructive() *DestructiveFilter {
 
 	f := &DestructiveFilter{}
 	for _, d := range defs {
-		re, err := regexp.Compile("(?i)" + d.pattern)
-		if err != nil {
-			continue
-		}
+		// Patterns are compile-time constants; a bad one is a programmer bug that
+		// must fail loudly here, never be silently dropped (a missing rule).
+		re := regexp.MustCompile("(?i)" + d.pattern)
 		f.rules = append(f.rules, rule{
 			function: d.function,
 			pattern:  re,
@@ -97,6 +101,17 @@ func (f *DestructiveFilter) Scan(command string) []Finding {
 				Severity: r.severity,
 			})
 		}
+	}
+
+	// "DELETE FROM ..." with no WHERE clause (RE2 has no negative lookahead).
+	if deleteFromPattern.MatchString(command) && !whereClausePattern.MatchString(command) {
+		findings = append(findings, Finding{
+			Module:   "destructive",
+			Function: "destructive",
+			Pattern:  `\bDELETE\s+FROM\b without WHERE`,
+			Detail:   "SQL DELETE without WHERE clause",
+			Severity: "high",
+		})
 	}
 	return findings
 }
