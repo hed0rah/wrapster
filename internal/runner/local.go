@@ -22,7 +22,7 @@ type localResult struct {
 
 // execLocal runs a command on the local machine using the system shell.
 func execLocal(ctx context.Context, command string, lc policy.LocalConfig) (*localResult, error) {
-	timeout := lc.Timeout
+	timeout := lc.Timeout.Std()
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}

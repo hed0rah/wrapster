@@ -36,7 +36,7 @@ type ExecOptions struct {
 // This delegates to the real OpenSSH client so we get agent forwarding,
 // ProxyJump, config file support, etc. for free.
 func Exec(ctx context.Context, opts ExecOptions) (*Result, error) {
-	timeout := opts.Policy.Timeout
+	timeout := opts.Policy.Timeout.Std()
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
