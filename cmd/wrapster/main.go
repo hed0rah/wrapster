@@ -32,7 +32,8 @@ Usage:
 Modes:
   wrapster config                         Interactive TUI config wizard (alias: setup)
   wrapster --mcp                          MCP server over stdio
-  wrapster --mcp-sse :8080                MCP server over HTTP SSE
+  wrapster --mcp-sse :8080                MCP server over HTTP SSE (legacy)
+  wrapster --mcp-http :8080               MCP server over Streamable HTTP
   wrapster --watch 30s <host> <cmd>       Poll a command on an interval
 
 Flags:
@@ -44,7 +45,9 @@ Flags:
   -s, --ssh-args <args>     Extra SSH args (comma-separated)
   -w, --watch <interval>    Poll interval (e.g. 30s, 1m, 5m)
       --mcp                 MCP server over stdio
-      --mcp-sse <addr>      MCP server over HTTP SSE (e.g. :8080, 127.0.0.1:8080)
+      --mcp-sse <addr>      MCP server over HTTP SSE, legacy (e.g. :8080)
+      --mcp-http <addr>     MCP server over Streamable HTTP (e.g. :8080)
+      --auth-token <tok>    Bearer token for --mcp-http (or WRAPSTER_AUTH_TOKEN env)
       --cache-ttl <dur>     Result cache TTL (default: 30s)
       --hostinfo-ttl <dur>  Host info cache TTL (default: 30m)
       --bufstore-max <n>    Max output buffer entries (default: 64)
@@ -67,6 +70,8 @@ type config struct {
 	listMode     bool
 	mcpMode      bool
 	mcpSSEAddr   string
+	mcpHTTPAddr  string
+	authToken    string
 	sshArgs      []string
 	watch        time.Duration
 	host         string
@@ -161,11 +166,24 @@ func main() {
 		return
 	}
 
-	// --mcp-sse mode (HTTP)
+	// --mcp-sse mode (legacy HTTP+SSE)
 	if cfg.mcpSSEAddr != "" {
 		srv := mcp.NewSSEServer(r, cfg.mcpSSEAddr)
 		if err := srv.ListenAndServe(); err != nil {
 			fatal("mcp-sse", err)
+		}
+		return
+	}
+
+	// --mcp-http mode (Streamable HTTP)
+	if cfg.mcpHTTPAddr != "" {
+		token := cfg.authToken
+		if token == "" {
+			token = os.Getenv("WRAPSTER_AUTH_TOKEN")
+		}
+		srv := mcp.NewStreamableServer(r, cfg.mcpHTTPAddr, token)
+		if err := srv.ListenAndServe(); err != nil {
+			fatal("mcp-http", err)
 		}
 		return
 	}
@@ -358,6 +376,18 @@ func parseArgs(args []string) (*config, error) {
 				return nil, fmt.Errorf("--mcp-sse requires an address (e.g. :8080)")
 			}
 			cfg.mcpSSEAddr = args[i]
+		case arg == "--mcp-http":
+			i++
+			if i >= len(args) {
+				return nil, fmt.Errorf("--mcp-http requires an address (e.g. :8080)")
+			}
+			cfg.mcpHTTPAddr = args[i]
+		case arg == "--auth-token":
+			i++
+			if i >= len(args) {
+				return nil, fmt.Errorf("--auth-token requires a token")
+			}
+			cfg.authToken = args[i]
 		case arg == "-j" || arg == "--json":
 			cfg.jsonOutput = true
 		case arg == "-n" || arg == "--dry-run":
@@ -371,7 +401,7 @@ func parseArgs(args []string) (*config, error) {
 		}
 	}
 
-	if cfg.showVersion || cfg.mcpMode || cfg.mcpSSEAddr != "" {
+	if cfg.showVersion || cfg.mcpMode || cfg.mcpSSEAddr != "" || cfg.mcpHTTPAddr != "" {
 		return cfg, nil
 	}
 

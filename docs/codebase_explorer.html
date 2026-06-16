@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0" />
+<title>wrapster codebase explorer / dev</title>
+<meta name="description" content="Source-level reference for wrapster: MCP transport internals, policy validation, filter chain, bufstore paging, and the config wizard." />
+<meta property="og:title" content="wrapster codebase explorer / dev" />
+<meta property="og:type" content="article" />
+<style>
+:root{
+  --paper:#f5f0e3;
+  --ink:#1c1a14;
+  --muted:#6b644e;
+  --line:#c8c0a4;
+  --soft:rgba(0,0,0,0.012);
+  --accent-deep:#1d3d1a;
+  --accent-hot:#2d6626;
+  --accent-warm:#52a844;
+  --accent-warm-soft:rgba(82,168,68,0.10);
+  --accent-hot-soft:rgba(45,102,38,0.08);
+  --accent-deep-soft:rgba(29,61,26,0.06);
+  --code-bg:#111c0f;
+  --code-fg:#b8d4a8;
+  --ex-bg:#ede8d6;
+  --pin-bg:rgba(45,102,38,0.14);
+  --ink-soft:#2c2818;
+  --line-soft:rgba(200,192,164,0.70);
+  --code-inline-bg:rgba(29,61,26,0.10);
+  --code-kw:#8fd46a;
+  --code-hdr:#5cc08a;
+  --code-cm:#4a6040;
+  --code-num:#c8b85a;
+  --code-str:#7ac878;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;color:var(--ink);background:var(--paper);font-family:"Iowan Old Style","Palatino Linotype","Book Antiqua",Georgia,serif;line-height:1.45}
+.page{max-width:1240px;margin:0 auto;padding:24px 16px 44px}
+.sheet{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:26px;align-items:start}
+.paper{min-width:0;border-top:2px solid var(--accent-deep);border-bottom:1px solid var(--line);padding:20px 0 24px}
+.eyebrow{margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:0.14em;color:var(--accent-hot);font-weight:600}
+h1,h2,h3{margin:0;font-weight:600;line-height:1.2}
+h1{font-size:clamp(1.55rem,2.1vw,1.9rem);letter-spacing:-0.02em;margin-bottom:6px;color:var(--accent-deep)}
+h2{font-size:0.92rem;margin-top:20px;margin-bottom:6px;padding-top:10px;border-top:1px solid var(--line);color:var(--accent-deep);text-transform:uppercase;letter-spacing:0.05em}
+h3{font-size:0.86rem;margin:8px 0 4px;color:var(--ink)}
+p{margin:0 0 6px;font-size:0.86rem}
+.lede{font-size:0.9rem;color:var(--ink-soft);margin:6px 0 14px}
+code{font-family:"SFMono-Regular","SF Mono",Menlo,Consolas,monospace;font-size:0.85em;background:var(--code-inline-bg);padding:0.04rem 0.22rem;border-radius:1px}
+.chip{display:inline-block;margin:0 3px 3px 0;padding:1px 6px;border:1px solid var(--line);border-radius:2px;font-size:0.69rem;letter-spacing:0.02em;color:var(--muted)}
+.spec-line{display:inline-block;padding:2px 8px;border:1px solid var(--accent-deep);background:var(--accent-deep-soft);font-family:"SFMono-Regular",monospace;font-size:0.74rem;color:var(--accent-deep);margin-right:6px;letter-spacing:0.03em}
+.term{cursor:pointer;border-bottom:1px dotted var(--accent-deep);color:var(--accent-deep);transition:.1s;padding:0 1px;font-weight:500}
+.term:hover,.term:focus-visible,.term.is-active{background:var(--accent-warm-soft);color:var(--accent-hot);border-bottom-color:var(--accent-hot);outline:none}
+.term.is-pinned{background:var(--pin-bg);color:var(--accent-hot);border-bottom-style:solid}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:6px;margin:10px 0 14px}
+.stat{padding:8px 10px;border:1px solid var(--line);background:var(--paper)}
+.stat .num{font-family:"Iowan Old Style",Georgia,serif;font-size:1.45rem;font-weight:600;color:var(--accent-deep);line-height:1.1}
+.stat .lbl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-top:2px}
+.compare{width:100%;border-collapse:collapse;font-size:0.82rem;margin:6px 0 8px}
+.compare th,.compare td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
+.compare th{background:var(--accent-deep-soft);color:var(--accent-deep);font-weight:600;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em}
+.compare td.note{color:var(--muted);font-style:italic;font-size:0.78rem}
+.compare td code{font-size:0.78em}
+.bul{list-style:none;padding:0;margin:4px 0 8px}
+.bul li{padding:2px 0 2px 16px;font-size:0.84rem;position:relative;line-height:1.5;color:var(--ink-soft)}
+.bul li::before{content:"\00b7";position:absolute;left:5px;color:var(--accent-hot);font-weight:700;font-size:1.1rem;line-height:1}
+.bul li strong{color:var(--accent-deep);font-weight:600}
+.bul li code{font-size:0.82em}
+.wireblock{font-family:"SFMono-Regular",Menlo,Consolas,monospace;font-size:0.75rem;background:var(--code-bg);color:var(--code-fg);padding:10px 12px;margin:6px 0 10px;line-height:1.55;overflow-x:auto;white-space:pre;border-left:3px solid var(--accent-hot)}
+.wireblock .kw{color:var(--code-kw)}
+.wireblock .hdr{color:var(--code-hdr)}
+.wireblock .cm{color:var(--code-cm);font-style:italic}
+.wireblock .num{color:var(--code-num)}
+.wireblock .str{color:var(--code-str)}
+.tree{font-family:"SFMono-Regular",Menlo,Consolas,monospace;font-size:0.75rem;background:var(--ex-bg);border:1px solid var(--line);padding:10px 14px;margin:6px 0 10px;line-height:1.7;overflow-x:auto;white-space:pre;color:var(--ink-soft)}
+.tree .dim{color:var(--muted)}
+.figure{margin:8px 0 12px;border:1px solid var(--line);background:var(--ex-bg);padding:10px}
+.figure svg{display:block;max-width:100%;height:auto;margin:0 auto}
+.figure .cap{font-size:0.74rem;color:var(--muted);text-align:center;margin-top:6px;font-style:italic;letter-spacing:0.02em}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;margin:8px 0 0}
+.tab-btn{font-family:"SFMono-Regular",monospace;font-size:0.68rem;padding:2px 9px;border:1px solid var(--line);background:var(--paper);color:var(--muted);cursor:pointer;border-radius:2px;text-transform:uppercase;letter-spacing:0.06em;transition:.15s}
+.tab-btn:hover{border-color:var(--accent-hot);color:var(--accent-hot)}
+.tab-btn[data-active="true"]{background:var(--accent-deep);color:var(--paper);border-color:var(--accent-deep)}
+.refs{font-size:0.78rem;line-height:1.55;margin:6px 0}
+.refs .ref-row{display:grid;grid-template-columns:130px 1fr;gap:10px;padding:3px 0;border-bottom:1px dashed var(--line)}
+.refs .ref-row:last-child{border-bottom:none}
+.refs .ref-row .key{font-family:"SFMono-Regular",monospace;font-size:0.72rem;color:var(--accent-deep);font-weight:600;text-transform:uppercase;letter-spacing:0.03em}
+.refs .ref-row .val a{color:var(--accent-hot);text-decoration:none;border-bottom:1px dotted var(--accent-hot)}
+.refs .ref-row .val a:hover{background:var(--accent-hot-soft)}
+.refs .ref-row .val .desc{color:var(--muted);font-style:italic;font-size:0.74rem;margin-left:6px}
+.repo-link{display:inline-block;margin-top:4px;padding:3px 8px;border:1px solid var(--accent-deep);background:var(--paper);color:var(--accent-deep);text-decoration:none;font-size:0.72rem;letter-spacing:0.04em;font-family:"SFMono-Regular",monospace}
+.repo-link:hover{background:var(--accent-deep);color:var(--paper)}
+.margin{position:sticky;top:18px;border-top:2px solid var(--accent-deep);padding-top:10px;font-size:0.82rem;color:var(--muted)}
+.margin-card{border:1px solid var(--line);border-left:3px solid var(--accent-hot);background:rgba(0,0,0,0.012);padding:12px 12px 10px;min-height:340px;transition:border-left-color .15s,background .15s}
+.margin-card.is-pinned{border-left-color:var(--accent-deep);background:var(--accent-deep-soft)}
+.margin h3{font-size:0.9rem;margin-bottom:6px;color:var(--accent-deep)}
+.margin p{margin-bottom:7px;font-size:0.8rem}
+.margin-code{display:inline-block;margin-top:2px;margin-bottom:6px;color:var(--accent-hot)}
+.margin-snippet{display:none;font-family:"SFMono-Regular",Menlo,Consolas,monospace;font-size:0.67rem;background:var(--code-bg);color:var(--code-fg);padding:8px 9px;margin:8px 0 2px;white-space:pre;overflow-x:auto;border-left:2px solid var(--accent-hot);line-height:1.5}
+.margin-meta{display:grid;grid-template-columns:1fr 1fr;gap:5px 10px;margin:7px 0 8px;padding:7px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);color:var(--ink-soft)}
+.margin-meta strong{display:block;font-size:9px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:1px}
+.margin-meta span{font-size:0.8rem}
+.margin-section{margin-top:10px}
+.margin-section .label{font-size:9px;text-transform:uppercase;letter-spacing:0.1em;color:var(--muted);margin-bottom:3px}
+.margin-section ul{margin:0;padding:0;list-style:none}
+.margin-section li{padding:2px 0;border-top:1px solid var(--line-soft);font-size:0.76rem;color:var(--ink-soft);font-family:"SFMono-Regular",Menlo,Consolas,monospace}
+.margin-section li:first-child{border-top:none}
+.margin-section .more{color:var(--muted);font-style:italic;font-family:inherit}
+.margin-section a{color:var(--accent-hot);text-decoration:none;border-bottom:1px dotted var(--accent-hot);font-family:inherit;word-break:break-word}
+.margin-section a:hover{background:var(--accent-hot-soft);color:var(--accent-deep)}
+.margin-section li.link-item{white-space:normal;font-family:inherit;padding:4px 0}
+.margin-section li.link-item .src{display:block;font-size:0.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-top:1px;font-family:"SFMono-Regular",monospace}
+.margin-pin-bar{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding-top:7px;border-top:1px solid var(--line)}
+.margin-hint{font-size:0.72rem;color:var(--muted)}
+.margin-hint kbd{font-family:"SFMono-Regular",Menlo,Consolas,monospace;font-size:0.7rem;padding:0 4px;border:1px solid var(--line);border-radius:2px;background:var(--soft)}
+.margin-unpin{font-family:inherit;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;padding:2px 7px;border:1px solid var(--accent-hot);background:transparent;color:var(--accent-hot);cursor:pointer;border-radius:2px;display:none}
+.margin-card.is-pinned .margin-status{color:var(--accent-hot);font-weight:600;text-transform:uppercase;letter-spacing:0.08em;font-size:9px}
+.footer{margin-top:20px;padding-top:10px;border-top:1px solid var(--line);color:var(--muted);font-size:0.76rem}
+.footer .signoff{color:var(--accent-deep);font-weight:600;letter-spacing:0.05em}
+@media (max-width:980px){
+  .sheet{grid-template-columns:1fr}
+  .margin{position:static;order:2;border-top:1px solid var(--line)}
+  .stat-grid{grid-template-columns:1fr 1fr}
+  .compare{font-size:0.76rem}
+  .refs .ref-row{grid-template-columns:100px 1fr}
+}
+@media print{
+  body{background:#fff}
+  .margin,.tabs{display:none}
+  .term{border-bottom:none;color:var(--accent-deep)!important;background:transparent!important}
+}
+</style>
+</head>
+<body>
+<div class="page"><div class="sheet">
+
+<article class="paper">
+  <p class="eyebrow">Engineering Reference / wrapster secure command gateway</p>
+  <h1>wrapster: policy-gated command execution and MCP server</h1>
+  <p class="lede">
+    <span class="spec-line">dev</span>
+    <span class="spec-line">Go 1.22+</span>
+    <span class="spec-line">stdlib + yaml.v3 + charm TUI</span>
+    A single static binary that acts as a security gateway between an LLM and shell commands. All SSH and local execution is gated by a YAML policy; a filter chain catches exploit techniques that policy alone cannot enumerate. Exposed as an MCP server over stdio, Streamable HTTP, or legacy SSE, with a bubbletea config wizard for setup.
+    <a class="repo-link" href="https://github.com/hed0rah/wrapster" target="_blank" rel="noopener">view on github</a>
+  </p>
+
+  <div class="stat-grid">
+    <div class="stat"><div class="num">9</div><div class="lbl">MCP tools</div></div>
+    <div class="stat"><div class="num">3</div><div class="lbl">MCP transports</div></div>
+    <div class="stat"><div class="num">5</div><div class="lbl">filter modules</div></div>
+    <div class="stat"><div class="num">73</div><div class="lbl">tests passing</div></div>
+  </div>
+
+  <h2>Source tree</h2>
+  <div class="tree"><span class="term" data-term="main-go">cmd/wrapster/main.go</span>    <span class="dim">CLI entry, parseArgs, mode dispatch</span>
+internal/
+  mcp/
+    <span class="term" data-term="mcp-server">server.go</span>         <span class="dim">stdio transport, handleMessage, gateMethod, cancelRegistry</span>
+    <span class="term" data-term="sse-go">sse.go</span>            <span class="dim">legacy HTTP+SSE transport, /sse + /message, gzip</span>
+    <span class="term" data-term="streamhttp-go">streamhttp.go</span>     <span class="dim">Streamable HTTP, POST/DELETE /mcp, bearer auth, DNS-rebind guard</span>
+  policy/
+    <span class="term" data-term="policy-go">policy.go</span>         <span class="dim">Policy struct, HostPolicy, CommandRule, Duration, ResolvedPolicy</span>
+    <span class="term" data-term="validate-go">validate.go</span>       <span class="dim">ValidateCommand, hardDenyFused, segmentSplitter, AuditPolicy</span>
+  filter/
+    <span class="term" data-term="filter-go">filter.go</span>         <span class="dim">Filter interface, Chain, Finding struct, block severities</span>
+    <span class="term" data-term="gtfobins-go">gtfobins.go</span>       <span class="dim">embedded gtfobins.json, universal + per-binary rules, codeToPattern</span>
+    <span class="term" data-term="universal-go">universal.go</span>      <span class="dim">exploit-class patterns: shell spawn, reverse shell, exfil, escalation</span>
+    <span class="term" data-term="destructive-go">destructive.go</span>    <span class="dim">filesystem destruction, SQL DROP/TRUNCATE/DELETE, git/docker/kubectl</span>
+    <span class="term" data-term="exfil-go">exfil.go</span>          <span class="dim">outbound transfer detection, RE2 post-filter for external hosts</span>
+    <span class="term" data-term="workdir-go">workdir.go</span>        <span class="dim">path escape detection for local.work_dir restriction</span>
+    <span class="term" data-term="custom-go">custom.go</span>         <span class="dim">user-defined rule files loaded at startup</span>
+  runner/
+    <span class="term" data-term="runner-go">runner.go</span>         <span class="dim">Runner struct, Exec, ExecLocal, BatchExec, Validate, formatFindings</span>
+    local.go            <span class="dim">execLocal, exec.CommandContext, environment injection</span>
+  bufstore/
+    <span class="term" data-term="bufstore-go">bufstore.go</span>       <span class="dim">ring buffer, Put/Slice/Grep, FIFO eviction at 64 entries</span>
+  cache/
+    <span class="term" data-term="cache-go">result.go</span>         <span class="dim">ResultCache, TTL expiry, (host+command) key, Flush/Invalidate</span>
+  hostinfo/
+    <span class="term" data-term="hostinfo-go">hostinfo.go</span>       <span class="dim">Fingerprint probes: OS, kernel, shell, pkg mgr, tools; 30m cache</span>
+  output/
+    <span class="term" data-term="output-go">process.go</span>        <span class="dim">StripANSI, head+tail truncate, Tracker atomic stats</span>
+  wizard/
+    <span class="term" data-term="wizard-go">model.go</span>          <span class="dim">bubbletea model, 7 menu actions, live YAML preview viewport</span>
+    screens.go          <span class="dim">huh forms for local/filters/output/hosts/save/mcp sections</span>
+    theme.go            <span class="dim">lipgloss style palette for the TUI</span>
+  mcpconfig/
+    <span class="term" data-term="mcpconfig-client">client.go</span>         <span class="dim">Registry() of 7 clients: claude-desktop, claude-code, cursor, windsurf, cline, vscode, lmstudio</span>
+    <span class="term" data-term="mcpconfig-merge">merge.go</span>          <span class="dim">Merge + MergeNested: pure json.RawMessage safe-merge, preserves siblings</span>
+    <span class="term" data-term="mcpconfig-register">register.go</span>       <span class="dim">Register, RegisterAll, atomic write + .bak, claude CLI path</span>
+    detect.go           <span class="dim">binary detection via exec.LookPath</span>
+    paths.go            <span class="dim">per-OS config paths for each client</span>
+    entry.go            <span class="dim">ServerEntry: command + args + env JSON shape</span>
+  atomicfile/
+    <span class="term" data-term="atomicfile-go">atomicfile.go</span>     <span class="dim">atomic write via natefinch/atomic + timestamped .bak backup</span>
+  audit/
+    log.go              <span class="dim">audit logger: host, command, allowed, exit code, output hash</span>
+  policyio/
+    policyio.go         <span class="dim">MarshalYAML round-trip for the wizard preview</span>
+  ssh/
+    client.go           <span class="dim">SSH connection pool, ControlMaster reuse, ExecOptions</span></div>
+
+  <h2>Data flow: three MCP transports</h2>
+  <p>All three transports share <span class="term" data-term="handle-message">handleMessage</span> and <span class="term" data-term="gate-method">gateMethod</span>. The state machine enforces CONNECTED to INITIALIZING to READY before any tool call is dispatched.</p>
+
+  <div class="figure">
+  <svg viewBox="0 0 740 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="three MCP transport paths converging on handleMessage">
+    <defs><marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--accent-deep,#1d3d1a)"/></marker>
+    <marker id="ar2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--accent-deep,#1d3d1a)"/></marker></defs>
+    <style>
+      .bx{fill:var(--paper,#f5f0e3);stroke:var(--accent-deep,#1d3d1a);stroke-width:1.1}
+      .bxh{fill:var(--ex-bg,#ede8d6);stroke:var(--accent-deep,#1d3d1a);stroke-width:1.1}
+      .hot{stroke:var(--accent-hot,#2d6626)}
+      .lb{font:600 10px "SFMono-Regular",Menlo,Consolas,monospace;fill:var(--accent-deep,#1d3d1a)}
+      .sm{font:9px "SFMono-Regular",Menlo,Consolas,monospace;fill:var(--muted,#6b644e)}
+      .fl{stroke:var(--accent-deep,#1d3d1a);stroke-width:1;fill:none;marker-end:url(#ar)}
+      .fld{stroke:var(--accent-warm,#52a844);stroke-width:1;fill:none;marker-end:url(#ar2);stroke-dasharray:4 3}
+    </style>
+    <!-- stdio -->
+    <rect class="bx" x="8" y="20" width="108" height="36"/><text class="lb" x="16" y="34">stdio</text><text class="sm" x="16" y="46">--mcp flag</text>
+    <!-- sse -->
+    <rect class="bx" x="8" y="70" width="108" height="36"/><text class="lb" x="16" y="84">HTTP+SSE</text><text class="sm" x="16" y="96">--mcp-sse :8080</text>
+    <!-- streamhttp -->
+    <rect class="bx" x="8" y="120" width="108" height="36"/><text class="lb" x="16" y="134">Streamable HTTP</text><text class="sm" x="16" y="146">--mcp-http :8080</text>
+
+    <!-- gateMethod box -->
+    <rect class="bxh" x="152" y="60" width="120" height="60"/>
+    <text class="lb" x="162" y="76">gateMethod</text>
+    <text class="sm" x="162" y="88">CONNECTED</text>
+    <text class="sm" x="162" y="100">INITIALIZING</text>
+    <text class="sm" x="162" y="112">READY</text>
+
+    <!-- arrows from transports to gateMethod -->
+    <path class="fl" d="M116,38 C138,38 140,72 152,82"/>
+    <path class="fl" d="M116,88 L152,88"/>
+    <path class="fl" d="M116,138 C138,138 140,104 152,100"/>
+
+    <!-- handleMessage box -->
+    <rect class="bxh" x="312" y="60" width="138" height="60"/>
+    <text class="lb" x="322" y="80">handleMessage</text>
+    <text class="sm" x="322" y="94">tools/list, resources</text>
+    <text class="sm" x="322" y="106">prompts, initialize</text>
+
+    <path class="fl" d="M272,90 L312,90"/>
+
+    <!-- handleToolCall box -->
+    <rect class="bxh" x="312" y="148" width="138" height="60"/>
+    <text class="lb" x="322" y="166">handleToolCall</text>
+    <text class="sm" x="322" y="180">9 cases: exec</text>
+    <text class="sm" x="322" y="192">ssh_exec, batch_exec...</text>
+
+    <path class="fld" d="M381,120 L381,148"/>
+
+    <!-- cancelRegistry -->
+    <rect class="bx hot" x="490" y="60" width="120" height="36"/>
+    <text class="lb" x="500" y="74">cancelRegistry</text>
+    <text class="sm" x="500" y="86">per-ID cancel funcs</text>
+    <path class="fld" d="M450,80 L490,80"/>
+
+    <!-- runner box -->
+    <rect class="bx hot" x="490" y="148" width="120" height="60"/>
+    <text class="lb" x="500" y="166">Runner.Exec*</text>
+    <text class="sm" x="500" y="180">policy + filter</text>
+    <text class="sm" x="500" y="192">SSH / local</text>
+    <path class="fl" d="M450,178 L490,178"/>
+
+    <!-- SSE details -->
+    <text class="sm" x="8" y="182">/sse: event stream</text>
+    <text class="sm" x="8" y="194">/message?sessionId=X</text>
+    <text class="sm" x="8" y="206">gzip if Accept-Encoding</text>
+    <!-- streamhttp details -->
+    <text class="sm" x="8" y="220">POST /mcp + Mcp-Session-Id</text>
+    <text class="sm" x="8" y="232">DELETE /mcp = close session</text>
+    <text class="sm" x="8" y="244">bearer auth, loopback origin</text>
+  </svg>
+  <div class="cap">fig. 1: all three transports funnel through gateMethod then handleMessage; tools/call dispatches concurrently in stdio and SSE, synchronously in streamable HTTP (net/http handles concurrency there)</div>
+  </div>
+
+  <h2>Data flow: a command through the security stack</h2>
+  <p>Every command, regardless of transport, passes through the same ordered checks. Hard denies run first on a <span class="term" data-term="hard-deny">fused DFA</span>, then mode-specific policy, then the <span class="term" data-term="filter-chain">filter chain</span>.</p>
+
+  <div class="figure">
+  <svg viewBox="0 0 740 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="command validation pipeline">
+    <defs><marker id="ar3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--accent-deep,#1d3d1a)"/></marker>
+    <marker id="ar4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--accent-hot,#2d6626)"/></marker></defs>
+    <style>
+      .bx2{fill:var(--paper,#f5f0e3);stroke:var(--accent-deep,#1d3d1a);stroke-width:1.1}
+      .bx2h{fill:var(--ex-bg,#ede8d6);stroke:var(--accent-deep,#1d3d1a);stroke-width:1.1}
+      .bx2r{fill:var(--paper,#f5f0e3);stroke:var(--accent-hot,#2d6626);stroke-width:1.3}
+      .lb2{font:600 10px "SFMono-Regular",Menlo,Consolas,monospace;fill:var(--accent-deep,#1d3d1a)}
+      .sm2{font:9px "SFMono-Regular",Menlo,Consolas,monospace;fill:var(--muted,#6b644e)}
+      .fl2{stroke:var(--accent-deep,#1d3d1a);stroke-width:1;fill:none;marker-end:url(#ar3)}
+      .fle{stroke:var(--accent-hot,#2d6626);stroke-width:1;fill:none;marker-end:url(#ar4);stroke-dasharray:4 3}
+    </style>
+    <rect class="bx2" x="8" y="74" width="68" height="36"/><text class="lb2" x="16" y="88">command</text><text class="sm2" x="16" y="100">string</text>
+    <path class="fl2" d="M76,92 L100,92"/>
+
+    <rect class="bx2h" x="102" y="60" width="94" height="60"/>
+    <text class="lb2" x="112" y="76">hardDenyFused</text>
+    <text class="sm2" x="112" y="90">one DFA pass</text>
+    <text class="sm2" x="112" y="102">10 patterns</text>
+    <text class="sm2" x="112" y="114">rm -rf /, fork bomb...</text>
+
+    <path class="fle" d="M149,60 L149,30"/>
+    <text class="sm2" x="106" y="24">DENIED</text>
+
+    <path class="fl2" d="M196,90 L220,90"/>
+
+    <rect class="bx2h" x="222" y="60" width="108" height="60"/>
+    <text class="lb2" x="232" y="76">mode check</text>
+    <text class="sm2" x="232" y="90">guardrail: allow</text>
+    <text class="sm2" x="232" y="102">unless denied_patterns</text>
+    <text class="sm2" x="232" y="114">allowlist: must match rule</text>
+
+    <path class="fle" d="M276,60 L276,30"/>
+    <text class="sm2" x="244" y="24">DENIED</text>
+
+    <path class="fl2" d="M330,90 L354,90"/>
+
+    <rect class="bx2h" x="356" y="60" width="108" height="60"/>
+    <text class="lb2" x="366" y="76">filter chain</text>
+    <text class="sm2" x="366" y="90">gtfobins universal</text>
+    <text class="sm2" x="366" y="102">+ per-binary rules</text>
+    <text class="sm2" x="366" y="114">destructive, exfil, workdir</text>
+
+    <path class="fle" d="M410,60 L410,30"/>
+    <text class="sm2" x="370" y="24">BLOCKED</text>
+
+    <path class="fl2" d="M464,90 L488,90"/>
+
+    <rect class="bx2r" x="490" y="64" width="110" height="52"/>
+    <text class="lb2" x="500" y="82">ALLOWED</text>
+    <text class="sm2" x="500" y="96">SSH exec or</text>
+    <text class="sm2" x="500" y="108">local exec</text>
+
+    <path class="fl2" d="M600,90 L624,90"/>
+    <rect class="bx2h" x="626" y="64" width="100" height="52"/>
+    <text class="lb2" x="636" y="82">output</text>
+    <text class="sm2" x="636" y="96">ANSI strip</text>
+    <text class="sm2" x="636" y="108">head+tail truncate</text>
+
+    <!-- allowlist segment split annotation -->
+    <text class="sm2" x="224" y="145">allowlist: each operator-separated</text>
+    <text class="sm2" x="224" y="157">segment must match independently</text>
+  </svg>
+  <div class="cap">fig. 2: SSH exec uses allowlist mode; local exec uses guardrail by default. hard denies are unconditional in both modes. the filter chain catches exploit classes policy cannot enumerate by name.</div>
+  </div>
+
+  <h2>Module reference</h2>
+  <div class="tabs" id="mod-tabs">
+    <button class="tab-btn" data-filter="all" data-active="true">all</button>
+    <button class="tab-btn" data-filter="mcp">mcp</button>
+    <button class="tab-btn" data-filter="policy">policy + runner</button>
+    <button class="tab-btn" data-filter="filter">filters</button>
+    <button class="tab-btn" data-filter="support">support</button>
+    <button class="tab-btn" data-filter="wizard">wizard + config</button>
+  </div>
+  <table class="compare" id="mod-table">
+    <thead><tr><th>module</th><th>role</th><th>worth knowing</th></tr></thead>
+    <tbody>
+      <tr data-mod="mcp"><td><span class="term" data-term="mcp-server">mcp/server.go</span></td><td>stdio MCP transport</td><td><span class="term" data-term="gate-method">gateMethod</span> state machine, concurrent tools/call dispatch, <span class="term" data-term="cancel-registry">cancelRegistry</span>, progress notifications</td></tr>
+      <tr data-mod="mcp"><td><span class="term" data-term="sse-go">mcp/sse.go</span></td><td>legacy HTTP+SSE</td><td>GET /sse streams events, POST /message?sessionId=X submits requests; <span class="term" data-term="gzip-sse">gzip SSE</span> with BSYNC flush</td></tr>
+      <tr data-mod="mcp"><td><span class="term" data-term="streamhttp-go">mcp/streamhttp.go</span></td><td>Streamable HTTP (2025-03-26)</td><td>POST /mcp returns JSON directly; DELETE closes session; <span class="term" data-term="loopback-guard">loopback origin guard</span> against DNS rebinding; bearer token via <code>subtle.ConstantTimeCompare</code></td></tr>
+      <tr data-mod="mcp"><td><span class="term" data-term="handle-message">handleMessage (server.go)</span></td><td>JSON-RPC dispatcher</td><td>9 MCP tools, resources/read, prompts/get, ping; all three transports call this</td></tr>
+      <tr data-mod="policy"><td><span class="term" data-term="policy-go">policy/policy.go</span></td><td>config types + loader</td><td><span class="term" data-term="resolved-policy">ResolvedPolicy</span> deep-copies maps/slices to avoid concurrent-dispatch races; <span class="term" data-term="duration-type">Duration type</span> round-trips "30s" through yaml.v3</td></tr>
+      <tr data-mod="policy"><td><span class="term" data-term="validate-go">policy/validate.go</span></td><td>command validation</td><td><span class="term" data-term="hard-deny">hardDenyFused</span> one-pass DFA; <span class="term" data-term="segment-split">allowlist segment splitting</span>; <span class="term" data-term="cmd-subst">cmdSubstPattern</span> blocks <code>$()</code> and backticks in allowlist mode</td></tr>
+      <tr data-mod="policy"><td><span class="term" data-term="runner-go">runner/runner.go</span></td><td>execution orchestrator</td><td>Runner struct wires policy + filters + caches; Exec uses allowlist, ExecLocal uses guardrail; BatchExec shares SSH connection pool</td></tr>
+      <tr data-mod="filter"><td><span class="term" data-term="filter-go">filter/filter.go</span></td><td>filter interface + chain</td><td>Chain.Block returns only findings at critical/high severity; Chain.Scan returns all for auditing</td></tr>
+      <tr data-mod="filter"><td><span class="term" data-term="gtfobins-go">filter/gtfobins.go</span></td><td>GTFOBins knowledge base</td><td>embedded <code>gtfobins.json</code>; universal patterns + per-binary rules extracted from code examples via <span class="term" data-term="code-to-pattern">codeToPattern</span></td></tr>
+      <tr data-mod="filter"><td><span class="term" data-term="universal-go">filter/universal.go</span></td><td>cross-binary exploit classes</td><td>shell spawn (40+ language variants), reverse shells, /dev/tcp, privilege escalation, evasion patterns; <span class="term" data-term="fail-loud">regexp.MustCompile</span> throughout</td></tr>
+      <tr data-mod="filter"><td><span class="term" data-term="destructive-go">filter/destructive.go</span></td><td>destructive operation detector</td><td>SQL DROP/TRUNCATE, git force push/reset, docker prune, kubectl delete --all; <span class="term" data-term="delete-no-where">DELETE without WHERE</span> via post-filter (RE2 has no negative lookahead)</td></tr>
+      <tr data-mod="filter"><td><span class="term" data-term="exfil-go">filter/exfil.go</span></td><td>exfiltration detector</td><td>external URL/scp/DNS match-then-post-filter: capture host, call <span class="term" data-term="is-local-host">isLocalHost</span>; RFC1918 treated as local</td></tr>
+      <tr data-mod="filter"><td><span class="term" data-term="workdir-go">filter/workdir.go</span></td><td>working directory escape guard</td><td>blocks <code>../</code> traversal and absolute paths outside <code>local.work_dir</code></td></tr>
+      <tr data-mod="support"><td><span class="term" data-term="bufstore-go">bufstore/bufstore.go</span></td><td>output ring buffer</td><td>FIFO eviction at 64 entries; <code>Slice(id, offset, length)</code> pager for buf:// reads; 8-hex buf_id from crypto/rand</td></tr>
+      <tr data-mod="support"><td><span class="term" data-term="cache-go">cache/result.go</span></td><td>result cache</td><td><code>(host+NUL+command)</code> key, TTL-based expiry, opportunistic eviction on Put</td></tr>
+      <tr data-mod="support"><td><span class="term" data-term="hostinfo-go">hostinfo/hostinfo.go</span></td><td>host fingerprinter</td><td>probes OS, kernel, shell, package manager, and common tools in a few SSH round-trips; 30-minute TTL cache</td></tr>
+      <tr data-mod="support"><td><span class="term" data-term="output-go">output/process.go</span></td><td>output processor</td><td>byte-scan for ESC before regex; <span class="term" data-term="truncate-ring">ring-buffer truncator</span> walks bytes for newline offsets without allocating per-line slices</td></tr>
+      <tr data-mod="support"><td><span class="term" data-term="atomicfile-go">atomicfile/atomicfile.go</span></td><td>atomic file writes</td><td>natefinch/atomic for cross-platform atomic rename; WriteWithBackup saves timestamped <code>.bak</code> before overwrite</td></tr>
+      <tr data-mod="wizard"><td><span class="term" data-term="wizard-go">wizard/model.go</span></td><td>bubbletea TUI wizard</td><td>7 menu actions, live YAML preview in a viewport pane, huh forms, lipgloss layout at 55/45 split</td></tr>
+      <tr data-mod="wizard"><td><span class="term" data-term="mcpconfig-client">mcpconfig/client.go</span></td><td>MCP client registry</td><td>7 clients; VS Code is the outlier with <code>Key: "servers"</code>; claude-code uses CLI path via <code>claude mcp add-json</code>; Nested flag for claude-code projects path</td></tr>
+      <tr data-mod="wizard"><td><span class="term" data-term="mcpconfig-merge">mcpconfig/merge.go</span></td><td>safe JSON merge</td><td>Merge + MergeNested preserve all siblings via <code>json.RawMessage</code>; only the target entry changes</td></tr>
+      <tr data-mod="wizard"><td><span class="term" data-term="mcpconfig-register">mcpconfig/register.go</span></td><td>client registration</td><td>read/merge/write with atomicfile; genuine missing file (not read error) opens new config; action reported as created/merged/skipped/overwritten/cli</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Policy system deep dive</h2>
+
+  <h3>Two validation modes</h3>
+  <ul class="bul">
+    <li><strong>Guardrail mode</strong> (local execution default): every command passes unless it hits a hard deny, a <code>denied_patterns</code> entry, or a filter finding. The filter chain is the primary safety net. Shell operators are automatically allowed in guardrail mode so LLMs can use pipes and redirects.</li>
+    <li><strong>Allowlist mode</strong> (all SSH execution): every command must match at least one <code>allowed_commands</code> rule. A <span class="term" data-term="command-rule">CommandRule</span> can specify an exact command plus an optional <code>args_pattern</code> regex, or a full-line regex in <code>pattern</code>. Unmatched commands are denied by default.</li>
+    <li><span class="term" data-term="segment-split">Segment splitting</span> closes the chain injection hole: when <code>allow_shell_operators: true</code>, each operator-separated segment must independently match a rule. An allowlisted <code>uptime</code> cannot drag <code>; curl attacker.com</code> through with it.</li>
+    <li><span class="term" data-term="cmd-subst">Command substitution</span> (<code>$()</code>, backticks, <code>&lt;()</code>) is unconditionally blocked in allowlist mode because it embeds a sub-command that cannot be validated per-segment.</li>
+  </ul>
+
+  <h3>Hard denies</h3>
+  <ul class="bul">
+    <li><span class="term" data-term="hard-deny">hardDenyFused</span> alternates all 10 individual patterns into one compiled regex so a single DFA pass answers "does any dangerous pattern match?" instead of running 10 sequential MatchString calls. The slow-path individual rules only run when fused fires, to name which one triggered.</li>
+    <li>Patterns include: <code>rm -rf /</code> in any short-flag order, <code>dd of=/dev/*</code>, raw disk writes, <code>mkfs</code>, fork bomb, <code>/etc/passwd|shadow|sudoers</code>, <code>chmod 777</code>, world-writable symbolic, and download-pipe-to-interpreter. These are unconditional in both modes.</li>
+    <li>Destructive-filter patterns intentionally omit the hard-deny cases to avoid redundant matching; policy runs first and would already have blocked them.</li>
+  </ul>
+
+  <h3>Policy resolution</h3>
+  <ul class="bul">
+    <li><span class="term" data-term="resolved-policy">ResolvedPolicy</span> merges <code>defaults</code> with the host-specific overrides. It deep-copies every reference-typed field (maps and slices) so a resolved HostPolicy never aliases the shared defaults. This matters because tools/call dispatches concurrently and multiple hosts could resolve simultaneously.</li>
+    <li>Allowed commands from defaults and host are <em>appended</em>, not replaced, so a default <code>uptime</code> rule is available on every host.</li>
+    <li>The <span class="term" data-term="duration-type">Duration type</span> wraps <code>time.Duration</code> with custom YAML marshal/unmarshal because yaml.v3 has no native duration support and would emit raw nanoseconds, breaking the documented "30s" policy format.</li>
+  </ul>
+
+  <h2>Filter chain deep dive</h2>
+
+  <h3>GTFOBins knowledge base</h3>
+  <ul class="bul">
+    <li>The embedded <code>gtfobins.json</code> is a structured form of the GTFOBins project: binaries with named techniques and code examples. <span class="term" data-term="code-to-pattern">codeToPattern</span> converts each code example into a targeted regex by matching known indicators (e.g. <code>pty.spawn</code>, <code>/bin/sh</code>, <code>-e /bin/bash</code>).</li>
+    <li><span class="term" data-term="gtfobins-go">GTFObinsFilter.Scan</span> applies universal patterns first (which catch exploit classes regardless of binary), then per-binary rules keyed on the extracted first token of the command. A <code>seen</code> map deduplicates findings when the same raw pattern fires twice.</li>
+    <li><span class="term" data-term="fail-loud">regexp.MustCompile</span> is used throughout the filter modules for all compile-time constant patterns. A bad pattern is a programmer bug; panicking at startup is preferable to silently dropping a security rule.</li>
+  </ul>
+
+  <h3>Exfil filter and RE2 workaround</h3>
+  <ul class="bul">
+    <li>RE2 (Go's regex engine) has no negative lookahead. Rules like "curl to a non-local host" cannot be expressed as a single regex. <span class="term" data-term="exfil-go">ExfilFilter.Scan</span> instead uses a match-then-post-filter pattern: capture the destination host from the command, then call <span class="term" data-term="is-local-host">isLocalHost</span> in Go to decide.</li>
+    <li><code>urlDestPattern</code> captures the hostname from curl/wget/fetch URLs. <code>sshDestPattern</code> captures the host from scp/rsync destination. <code>dnsTxtPattern</code> captures the resolver from <code>dig TXT @resolver</code>. All three are post-filtered.</li>
+    <li>RFC 1918 addresses (10.x, 172.16-31.x, 192.168.x) are treated as local so routine internal administration is not flagged as exfiltration.</li>
+  </ul>
+
+  <h2>Output pipeline and bufstore</h2>
+  <ul class="bul">
+    <li><span class="term" data-term="output-go">StripANSI</span> first does a byte scan for ESC (0x1b); if none present it returns the string unchanged without ever touching the regex. Only when ESC is found does <code>ansiPattern</code> run. This makes clean output (the common case) essentially free.</li>
+    <li>The <span class="term" data-term="truncate-ring">truncator</span> uses a ring buffer of newline offsets to find the tail section without splitting the string into lines first. It walks bytes once, tracking head-end and the last (tail+1) newline positions simultaneously.</li>
+    <li>When output is truncated, <span class="term" data-term="bufstore-go">BufStore</span> stores the full pre-truncation content under a random 8-hex buf_id. The tool result includes a <code>resource</code> content block with URI <code>buf://&lt;id&gt;</code> so the model can fetch the remainder via <code>resources/read</code> or search it with <code>grep_output</code>.</li>
+    <li>BufStore evicts the oldest entry when the 64-entry limit is hit. <code>Slice(id, offset, length)</code> supports offset+length paging for large buffers. <code>crypto/rand</code> failure panics rather than producing colliding zero-value IDs.</li>
+  </ul>
+
+  <h2>Config wizard (wrapster config)</h2>
+  <ul class="bul">
+    <li><span class="term" data-term="wizard-go">The bubbletea model</span> presents a 7-item menu (local, filters, output, hosts, save, MCP registration, quit) with a 55/45 split layout: left pane shows the active form or menu, right pane shows a live YAML preview rendered by <code>policyio.MarshalYAML</code>.</li>
+    <li>huh forms bind directly to policy fields. Form values that huh cannot bind (strings for durations, comma lists for commands) use scratch fields that are converted on form completion. Aborting a local/filters/output form still marks the policy dirty because huh binds fields live before abort is detected.</li>
+    <li><span class="term" data-term="mcpconfig-register">Registration</span> reads the existing config file, merges via <span class="term" data-term="mcpconfig-merge">Merge/MergeNested</span>, and writes atomically. A genuine missing file starts fresh; any other read error aborts to avoid overwriting a config that simply failed to read. A timestamped <code>.bak</code> is written before any overwrite.</li>
+    <li><span class="term" data-term="mcpconfig-client">Client registry</span> lists 7 MCP clients. VS Code is the outlier: it uses <code>Key: "servers"</code> instead of <code>"mcpServers"</code> and is project-scoped to <code>.vscode/mcp.json</code>. Claude Code uses its CLI (<code>claude mcp add-json</code>) when available, bypassing direct file surgery on the nested <code>.claude.json</code> structure.</li>
+  </ul>
+
+  <h2>External surface</h2>
+  <h3>MCP tools (9 total)</h3>
+  <table class="compare">
+    <thead><tr><th>tool</th><th>host</th><th>annotations</th><th>notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>exec</code></td><td>local</td><td>destructive, open-world</td><td>guardrail mode; result cache; buf:// on truncation</td></tr>
+      <tr><td><code>ssh_exec</code></td><td>any policy host</td><td>destructive, open-world</td><td>allowlist mode; SSH pool; buf:// on truncation</td></tr>
+      <tr><td><code>ssh_validate</code></td><td>any policy host</td><td>read-only, idempotent</td><td>dry-run through policy + filters, no exec</td></tr>
+      <tr><td><code>batch_exec</code></td><td>local or SSH</td><td>destructive, open-world</td><td>sequential per-command validation; shared SSH connection</td></tr>
+      <tr><td><code>host_info</code></td><td>any policy host</td><td>read-only, idempotent</td><td>probes OS/kernel/shell/tools; 30min cache; <code>refresh:true</code> forces re-probe</td></tr>
+      <tr><td><code>grep_output</code></td><td>local (buf)</td><td>read-only, idempotent</td><td>regex search over a stored buf_id; avoids fetching full buffer</td></tr>
+      <tr><td><code>cache_invalidate</code></td><td>local</td><td>idempotent</td><td>omit both args to flush all; or host+command for single entry</td></tr>
+      <tr><td><code>find_files</code></td><td>local or SSH</td><td>read-only, open-world</td><td>fd first (respects .gitignore), falls back to find; rawExec bypasses policy</td></tr>
+      <tr><td><code>grep_files</code></td><td>local or SSH</td><td>read-only, open-world</td><td>rg first, falls back to grep -r; glob filter optional; rawExec</td></tr>
+    </tbody>
+  </table>
+
+  <h3>MCP resources</h3>
+  <table class="compare">
+    <thead><tr><th>URI</th><th>mime</th><th>content</th></tr></thead>
+    <tbody>
+      <tr><td><code>stats://session</code></td><td>application/json</td><td>calls, raw_bytes, output_bytes, savings_pct from Tracker</td></tr>
+      <tr><td><code>policy://current</code></td><td>application/json</td><td>local_mode, hosts with user/allowed_commands/denied_patterns</td></tr>
+      <tr><td><code>host://{name}/allowed</code></td><td>text/plain</td><td>formatted allowed-commands list with GTFOBins warnings</td></tr>
+      <tr><td><code>host://{name}/info</code></td><td>application/json</td><td>cached hostinfo fingerprint, or probe-prompt if not cached</td></tr>
+      <tr><td><code>buf://{id}</code></td><td>text/plain</td><td>full truncated output; supports <code>?offset=N&amp;length=M</code> for paging</td></tr>
+    </tbody>
+  </table>
+
+  <h3>MCP prompts (3 total)</h3>
+  <table class="compare">
+    <thead><tr><th>prompt</th><th>args</th><th>does</th></tr></thead>
+    <tbody>
+      <tr><td><code>diagnose-host</code></td><td>host</td><td>uptime, df, free, last -- interprets and summarizes with actionable recommendations</td></tr>
+      <tr><td><code>compare-hosts</code></td><td>host_a, host_b</td><td>fingerprints both, compares allowed commands, runs uname+uptime, presents diff table</td></tr>
+      <tr><td><code>safety-review</code></td><td>host, command</td><td>validates via ssh_validate, reviews for GTFOBins risk, exfil potential, verdict: SAFE/CAUTION/DANGEROUS</td></tr>
+    </tbody>
+  </table>
+
+  <h2>References</h2>
+  <div class="refs">
+    <div class="ref-row"><span class="key">repo</span><span class="val"><a href="https://github.com/hed0rah/wrapster" target="_blank" rel="noopener">github.com/hed0rah/wrapster</a><span class="desc">source, issues, releases</span></span></div>
+    <div class="ref-row"><span class="key">mcp spec</span><span class="val"><a href="https://modelcontextprotocol.io/specification" target="_blank" rel="noopener">modelcontextprotocol.io/specification</a><span class="desc">JSON-RPC transport, capabilities, lifecycle</span></span></div>
+    <div class="ref-row"><span class="key">gtfobins</span><span class="val"><a href="https://gtfobins.github.io" target="_blank" rel="noopener">gtfobins.github.io</a><span class="desc">binary escape and privilege escalation knowledge base</span></span></div>
+    <div class="ref-row"><span class="key">mcp 2025-03-26</span><span class="val"><a href="https://modelcontextprotocol.io/specification/2025-03-26/basic/transports" target="_blank" rel="noopener">Streamable HTTP transport spec</a><span class="desc">Mcp-Session-Id, POST/DELETE /mcp, optional SSE streaming</span></span></div>
+    <div class="ref-row"><span class="key">internal</span><span class="val">docs/transports.md<span class="desc">transport comparison and migration notes, same repo</span></span></div>
+  </div>
+
+  <div class="footer"><span class="signoff">wrapster codebase explorer</span> &middot; dev &middot; 2026-06-16 &middot; hover any dotted term for source detail</div>
+</article>
+
+<aside class="margin">
+  <div class="margin-card" id="margin-card">
+    <p class="margin-code" style="display:block;font-size:9px;text-transform:uppercase;letter-spacing:0.12em;color:var(--muted)">
+      Source Inspector <span class="margin-status"></span>
+    </p>
+    <h3 id="m-title">Hover any underlined term</h3>
+    <code class="margin-code" id="m-code">&middot;</code>
+    <p id="m-body">Move the cursor over any dotted-underline term to load module details, security invariants, or data-flow notes. Click a term to pin the card while you read elsewhere.</p>
+    <pre class="margin-snippet" id="m-snippet"></pre>
+    <div class="margin-meta" id="m-meta"></div>
+    <div class="margin-section" id="m-rel"><div class="label">Related</div><ul><li class="more">&middot;</li></ul></div>
+    <div class="margin-section" id="m-notes"><div class="label">Notes</div><ul><li class="more">&middot;</li></ul></div>
+    <div class="margin-section" id="m-links"><div class="label">Sources</div><ul><li class="more">&middot;</li></ul></div>
+  </div>
+  <div class="margin-pin-bar">
+    <span class="margin-hint">hover &middot; click to pin &middot; <kbd>esc</kbd> unpin</span>
+    <button class="margin-unpin" id="margin-unpin" aria-label="Unpin reference card">unpin</button>
+  </div>
+</aside>
+
+</div></div>
+
+<script id="reference-data" type="application/json">
+{
+"main-go":{"title":"cmd/wrapster/main.go","code":"CLI entry + parseArgs","body":"Intercepts 'config' and 'setup' before flag parsing so they launch the wizard. Otherwise hand-rolls a flag parser into a config struct. Host 'local' is a magic first positional arg, not a real SSH target.","snippet":"// config/setup: intercepted before flags\nif args[0]==\"config\"||args[0]==\"setup\"{\n  wizard.Run(...)\n  return\n}","meta":{"loc":"510","flags":"14","positional":"<host> <cmd>"},"rel":["wizard-go","mcp-server","runner-go"],"notes":["--mcp-http reads WRAPSTER_AUTH_TOKEN env as fallback","--watch minimum is 5s to prevent accidental tight loops","loadPolicyFromPaths tries ./policy.yaml then ~/.config/wrapster/policy.yaml"]},
+"mcp-server":{"title":"mcp/server.go","code":"stdio transport + handleMessage","body":"Serve() reads newline-delimited JSON from stdin, dispatches via handleMessage, writes responses to stdout under encMu. tools/call is goroutine-dispatched so the read loop stays unblocked for notifications/cancelled during long execs.","snippet":"// tools/call runs concurrently\nif msg.Method==\"tools/call\"{\n  go func(m *jsonrpcMessage){\n    send(handleMessage(r,m,cr,cs,notify))\n  }(msg)\n  continue\n}","meta":{"loc":"1588","transport":"stdio","version":"dev","protocols":"2024-11-05, 2025-03-26"},"rel":["gate-method","handle-message","cancel-registry"],"notes":["negotiateVersion falls back to 2024-11-05 on unknown client version","wrapsterExperimental advertises gzip_sse, request_cancellation, concurrent_dispatch, output_handles","encMu serialises all writes; notify shares the same mutex"]},
+"sse-go":{"title":"mcp/sse.go","code":"legacy HTTP+SSE transport","body":"GET /sse opens an event stream and sends an endpoint event with the /message URL. POST /message?sessionId=X submits a request; the handler returns 202 immediately and pushes the JSON-RPC response onto the session channel.","snippet":"// endpoint event tells client where to POST\nfmt.Fprintf(ww,\n  \"event: endpoint\\ndata: %s\\n\\n\",\n  endpointURL)\nfw.Flush()","meta":{"routes":"/sse + /message","session id":"128-bit hex from crypto/rand","spec":"MCP 2024-11-05"},"rel":["gzip-sse","gate-method","handle-message"],"notes":["session channel is buffered at 64; slow readers drop events on overflow","X-Accel-Buffering: no suppresses nginx SSE buffering","handleMessage runs in a goroutine; response is pushed not returned"]},
+"streamhttp-go":{"title":"mcp/streamhttp.go","code":"Streamable HTTP transport","body":"Single /mcp endpoint. POST initializes (no session header) or dispatches (requires Mcp-Session-Id). DELETE closes a session. No server-initiated SSE stream: progress notifications are dropped. Bearer token via constant-time compare.","snippet":"// bearer check via constant-time compare\nreturn subtle.ConstantTimeCompare(\n  []byte(h[len(prefix):]),\n  []byte(s.authToken)) == 1","meta":{"endpoint":"POST /DELETE /mcp","auth":"Authorization: Bearer","session":"Mcp-Session-Id header","spec":"MCP 2025-03-26"},"rel":["loopback-guard","gate-method","handle-message"],"notes":["progress notifications are dropped (dropNotify) on the JSON path","missing or unknown session returns 404 to prompt re-initialize","auth token also accepted from WRAPSTER_AUTH_TOKEN env"]},
+"handle-message":{"title":"handleMessage","code":"mcp/server.go:handleMessage","body":"Central JSON-RPC dispatcher shared by all three transports. Handles initialize, notifications/initialized, tools/list, resources/list, resources/read, prompts/list, prompts/get, tools/call, and ping. Unknown methods return -32601.","snippet":"switch msg.Method {\ncase \"initialize\": ...\ncase \"tools/list\":\n  return respond(msg.ID,\n    toolsListResult{Tools:toolDefinitions()})\ncase \"tools/call\":\n  return handleToolCall(...)\n}","meta":{"methods":"10+","tools":"9","resources":"5 URIs","prompts":"3"},"rel":["mcp-server","gate-method","cancel-registry","bufstore-go"],"notes":["tools/call registers a cancel func before exec and deregisters after","startProgress begins emitting notifications/progress every 2s after a 1s gate","resources/read dispatches on URI prefix: stats://, policy://, host://, buf://"]},
+"gate-method":{"title":"gateMethod","code":"mcp/server.go:gateMethod","body":"Enforces the MCP connection state machine: CONNECTED (0) only accepts initialize and ping; INITIALIZING (1) only accepts notifications/initialized and ping; READY (2) accepts everything. Advances state on the correct messages.","snippet":"case stateConnected:\n  if msg.Method==\"initialize\"{\n    cs.set(stateInitializing)\n    return nil\n  }\n  return respondError(msg.ID,-32600,\n    \"server not initialized...\")","meta":{"states":"CONNECTED / INITIALIZING / READY","atomic":"sync/atomic.Int32","used by":"all 3 transports"},"rel":["mcp-server","sse-go","streamhttp-go"],"notes":["state is per-session for SSE and streamable-HTTP; global for stdio (one client)","ping is accepted in all states per MCP spec","incorrect method in wrong state returns JSON-RPC -32600"]},
+"cancel-registry":{"title":"cancelRegistry","code":"mcp/server.go:cancelRegistry","body":"Maps JSON-RPC request IDs to context.CancelFunc values for in-flight tool calls. The read loop can call cancel() on a running goroutine via notifications/cancelled while the exec is blocking on SSH. idKey canonicalizes the any-typed ID to avoid string/number collisions.","snippet":"func idKey(id any) string {\n  if id==nil { return \"null\" }\n  return fmt.Sprintf(\"%T:%v\",id,id)\n}","meta":{"key type":"type-tagged string","safe":"sync.Mutex","shared":"per session"},"rel":["mcp-server","sse-go","streamhttp-go"],"notes":["deregister called in defer so cancelled IDs never linger","propagates to exec.CommandContext which kills the child process","SSE and streamhttp have one registry per session; stdio has one per process"]},
+"gzip-sse":{"title":"gzipSSEWriter","code":"mcp/sse.go:gzipSSEWriter","body":"Wraps a gzip.Writer and http.ResponseWriter so Flush() does a BSYNC flush on the compressor before flushing the HTTP layer. Without this, events would accumulate in the gzip buffer and the client would never see them.","snippet":"func (g *gzipSSEWriter) Flush() {\n  g.gz.Flush() // BSYNC: output decodable\n  g.f.Flush()  // push to client\n}","meta":{"level":"BestSpeed","header":"Content-Encoding: gzip","guard":"Accept-Encoding check"},"rel":["sse-go"],"notes":["only active when client sends Accept-Encoding: gzip","gz.Flush() is a sync flush: compressor state survives, output is immediately decodable","gz.Close() deferred to end of handleSSE to send the gzip trailer"]},
+"loopback-guard":{"title":"loopbackOrigin","code":"mcp/streamhttp.go:loopbackOrigin","body":"Browser-set Origin headers must target localhost or 127.0.0.1 or ::1. Non-browser MCP clients send no Origin and are allowed. This closes DNS-rebinding attacks where a hostile page calls the local HTTP server from the user's browser.","snippet":"func loopbackOrigin(origin string) bool {\n  if origin==\"\" { return true }\n  u,_:=url.Parse(origin)\n  switch u.Hostname() {\n  case \"localhost\",\"127.0.0.1\",\"::1\":\n    return true\n  }\n  return false\n}","meta":{"applies to":"--mcp-http only","vector":"DNS rebinding via browser"},"rel":["streamhttp-go"],"notes":["CORS headers set Access-Control-Allow-Origin to the (loopback) origin, not *","prevents a malicious webpage from proxying tool calls to the local wrapster instance"]},
+"policy-go":{"title":"policy/policy.go","code":"Policy struct + LoadPolicy","body":"Top-level config: Defaults HostPolicy, Hosts map, Local LocalConfig, Filters FilterConfig, Output OutputConfig. LoadPolicy reads YAML, validates reserved host names, compiles all regexes at load time, and sets defaults for guardrail mode and output processing.","snippet":"// default output if none specified\nif !p.Output.ANSIStrip && ... {\n  p.Output=OutputConfig{\n    ANSIStrip:true,\n    Truncate:OutputTruncateConfig{\n      Enabled:true,\n      MaxChars:8192,\n      HeadLines:64,TailLines:16},\n  }\n}","meta":{"loc":"365","format":"YAML","module":"gopkg.in/yaml.v3"},"rel":["resolved-policy","duration-type","command-rule","validate-go"],"notes":["\"local\" is a reserved host name; policy load returns error if present","all regex compilation happens at load, not per-call; bad patterns fail fast","default local mode is guardrail with shell operators permitted"]},
+"validate-go":{"title":"policy/validate.go","code":"ValidateCommand + hardDeny","body":"Core validation function. Order: (1) hardDenyFused one-pass DFA, (2) shellOperatorPattern, (3) denied_patterns, (4) guardrail shortcut, (5) cmdSubstPattern, (6) Pattern rules, (7) per-segment allowlist. Each stage returns early on denial.","snippet":"// fused DFA: one pass for all 10 patterns\nif hardDenyFused.MatchString(cmd) {\n  for i:=range hardDenyRules {\n    if hardDenyRules[i].re.MatchString(cmd){\n      matched=hardDenyRules[i].raw\n      break\n    }\n  }\n  return ValidationResult{Allowed:false,...}\n}","meta":{"loc":"274","modes":"ModeAllowlist, ModeGuardrail","hard denies":"10 patterns"},"rel":["hard-deny","segment-split","cmd-subst","policy-go"],"notes":["compiledDeniedCache caches user-defined denied_patterns regexes via sync.Map","AuditPolicy checks allowed_commands against GTFOBins and returns level-tagged warnings","ruleLabel picks description, then Command, then Pattern for the deny reason"]},
+"hard-deny":{"title":"hardDenyFused","code":"policy/validate.go:hardDenyFused","body":"A fused alternation of all 10 hard-deny patterns compiled into one regex at package init time. A single MatchString call answers the question for all patterns combined; the slow-path individual rules only run when fused fires.","snippet":"var hardDenyFused=func() *regexp.Regexp {\n  parts:=make([]string,len(hardDenyRules))\n  for i:=range hardDenyRules {\n    hardDenyRules[i].re=regexp.MustCompile(\n      \"(?i)\"+hardDenyRules[i].raw)\n    parts[i]=\"(?:\"+hardDenyRules[i].raw+\")\"\n  }\n  return regexp.MustCompile(\n    \"(?i)\"+strings.Join(parts,\"|\"))\n}()","meta":{"patterns":"10","technique":"alternation fused DFA","cost":"one MatchString vs 10"},"rel":["validate-go","destructive-go"],"notes":["pattern names include: rm-rf-root, write-raw-disk, dd-device, mkfs, fork-bomb, shadow/sudoers, chmod-777, world-writable, download-pipe-interp","case-insensitive (?i) flag applied to the fused pattern","individual rules also carry compiled form for the slow-path name lookup"]},
+"segment-split":{"title":"allowlist segment splitting","code":"policy/validate.go:splitSegments","body":"In allowlist mode, after checking full-command Pattern rules, the command is split on shell control operators (;, |, &, &&, ||, newline) and each segment is validated independently. This prevents an allowlisted command from dragging trailing malicious segments through.","snippet":"var segmentSplitter=regexp.MustCompile(\n  `(?:&&|\\|\\||[;|&\\n\\r])`)\n\nfunc splitSegments(cmd string) []string {\n  parts:=segmentSplitter.Split(cmd,-1)\n  // trim and drop empty segments\n}","meta":{"splits on":";&|&&||| newline","mode":"allowlist only","requires":"allow_shell_operators: true"},"rel":["validate-go","cmd-subst"],"notes":["guardrail mode never reaches segment splitting (returns allowed before)","Pattern rules are checked against the full command first, before splitting","each segment must independently match at least one allowed_commands rule"]},
+"cmd-subst":{"title":"cmdSubstPattern","code":"policy/validate.go:cmdSubstPattern","body":"Rejects command substitution forms $(cmd), backtick, process substitution <(cmd) and >(cmd) in allowlist mode. These embed a sub-command that cannot be validated per-segment, so an attacker could hide disallowed commands inside an allowed wrapper.","snippet":"var cmdSubstPattern=regexp.MustCompile(\n  `\\$\\(|` + \"`\" + `|<\\(|>\\(`)\n// checked in allowlist mode before segments","meta":{"blocks":"$() `` <() >()","mode":"allowlist only","not blocked":"guardrail (shell ops ok)"},"rel":["segment-split","validate-go"],"notes":["Pattern rules (which match the full string) are checked before this gate","guardrail mode allows shell operators by default, so substitution is not blocked there","design decision: allowlist cannot enumerate substituted sub-commands, so block categorically"]},
+"command-rule":{"title":"CommandRule","code":"policy/policy.go:CommandRule","body":"A single allowed-command entry. Either Command (exact binary name, with optional ArgsPattern regex for the rest of the string) or Pattern (full-line regex anchored at both ends with ^ and $). The compiled field is nil for Command rules, non-nil for Pattern rules.","snippet":"func (r *CommandRule) Matches(full string) bool {\n  if r.compiled!=nil {\n    return r.compiled.MatchString(full)\n  }\n  parts:=strings.SplitN(full,\" \",2)\n  if parts[0]!=r.Command { return false }\n  if r.argsCompiled!=nil {\n    return r.argsCompiled.MatchString(args)\n  }\n  return true // any args\n}","meta":{"fields":"Command, Pattern, ArgsPattern, Description","compile":"at LoadPolicy","anchor":"^Pattern$"},"rel":["validate-go","policy-go"],"notes":["ArgsPattern only applies to Command rules, not Pattern rules","Description surfaces in --list output and audit logs","pattern anchoring: ^ and $ are prepended/appended during Compile"]},
+"resolved-policy":{"title":"ResolvedPolicy","code":"policy/policy.go:ResolvedPolicy","body":"Merges Defaults with host-specific overrides. Deep-copies all reference types (maps and slices via append and copyStringMap) so no resolved policy aliases the shared defaults. Concurrent tool calls for different hosts can safely resolve simultaneously.","snippet":"resolved:=p.Defaults\nresolved.SSHOptions=copyStringMap(p.Defaults.SSHOptions)\nresolved.Environment=copyStringMap(p.Defaults.Environment)\nresolved.AllowedCommands=append(\n  []CommandRule(nil),\n  p.Defaults.AllowedCommands...)","meta":{"called by":"Runner.Exec, Validate, ListAllowed","concurrent":"yes, no lock needed","merge":"append host rules to defaults"},"rel":["policy-go","runner-go"],"notes":["host AllowedCommands appended to defaults; both apply","SSHOptions and Environment are merged key-by-key; host wins on conflict","if host not found, returns a copy of defaults"]},
+"duration-type":{"title":"Duration type","code":"policy/policy.go:Duration","body":"A named type over time.Duration with custom YAML marshal/unmarshal. yaml.v3 has no native duration support and emits raw nanoseconds on Marshal, which breaks the documented \"30s\" policy format. The custom type round-trips human strings in both directions.","snippet":"func (d *Duration) UnmarshalYAML(node *yaml.Node) error {\n  var s string\n  if err:=node.Decode(&s); err==nil {\n    parsed,err:=time.ParseDuration(s)\n    *d=Duration(parsed); return err\n  }\n  // fallback: bare int = nanoseconds\n  var n int64\n  node.Decode(&n); *d=Duration(n); return nil\n}","meta":{"type":"time.Duration alias","yaml in":"\"30s\", \"1m\"","yaml out":"time.Duration.String()"},"rel":["policy-go","wizard-go"],"notes":["fallback to bare nanoseconds matches yaml.v3 raw encoding for forwards compatibility","Std() method converts back to time.Duration for use in exec timeouts","the wizard uses timeoutStr scratch field because huh cannot bind Duration directly"]},
+"filter-go":{"title":"filter/filter.go","code":"Filter interface + Chain","body":"Filter is a Name()+Scan(command) interface. Chain runs all active filters and applies severity thresholds: Block returns only findings at critical/high (the defaults), Scan returns all findings for audit logging.","snippet":"func (c *Chain) Block(command string) []Finding {\n  all:=c.Scan(command)\n  var blocked []Finding\n  for _,f:=range all {\n    if c.blockSeverities[f.Severity]{\n      blocked=append(blocked,f)\n    }\n  }\n  return blocked\n}","meta":{"block":"critical, high (default)","interface":"Name() + Scan()","Finding fields":"Module, Function, Pattern, Detail, Severity"},"rel":["gtfobins-go","destructive-go","exfil-go","runner-go"],"notes":["Scan is public so callers can log warn-level findings without blocking","NewChain accepts custom blockSeverities for future tunable alerting","filter order: gtfobins, destructive, exfil, workdir, custom"]},
+"gtfobins-go":{"title":"filter/gtfobins.go","code":"GTFObinsFilter","body":"Loads the embedded gtfobins.json at startup. Per-binary rules are stored in a map keyed on the binary name extracted from the first command token. Scan applies universal patterns first, then per-binary rules for the specific binary. A seen map deduplicates within a single call.","snippet":"func extractBinary(command string) string {\n  parts:=strings.Fields(command)\n  bin:=parts[0]\n  if idx:=strings.LastIndex(bin,\"/\");idx>=0{\n    bin=bin[idx+1:]\n  }\n  return bin\n}","meta":{"data":"//go:embed gtfobins.json","universal":"40+ patterns","per-binary":"from code examples"},"rel":["universal-go","code-to-pattern","fail-loud","filter-go"],"notes":["//go:embed means the JSON ships inside the binary with no runtime file dependency","codeToPattern dispatches on technique.Function: shell, reverse-shell, file-write, download, library-load","skips techniques with empty code or unrecognized function names"]},
+"universal-go":{"title":"filter/universal.go","code":"compileUniversal() -- cross-binary patterns","body":"Exploit patterns that apply regardless of which binary is used: Python/Ruby/Perl/PHP/Java/Node shell spawn, reverse shell indicators (/dev/tcp/, netcat/socat -e, mkfifo), privilege escalation (setuid(0)), SSH key access, and evasion (base64-decode-to-shell).","snippet":"// pattern: pipe to shell\n{`\\|\\s*(sh|bash|dash|zsh|ksh)\\b`,\n  \"shell\",\"critical\",\n  \"pipe to shell\"},\n// pattern: bash /dev/tcp reverse shell\n{`/dev/tcp/`,\n  \"reverse-shell\",\"critical\",\n  \"bash /dev/tcp reverse shell\"},","meta":{"patterns":"40+","languages":"py ruby perl php java node lua","severity":"critical, high"},"rel":["gtfobins-go","fail-loud","filter-go"],"notes":["coverage: exec/system/spawn in 8+ languages, not just bash","less ! and vim :! shell escapes are in the list","(?i) case-insensitive applied to all patterns via prefix in compileUniversal"]},
+"destructive-go":{"title":"filter/destructive.go","code":"DestructiveFilter","body":"Pattern-based detection of irreversible operations: filesystem destruction (shred, wipefs), SQL DDL (DROP TABLE/DATABASE, TRUNCATE TABLE, ALTER TABLE DROP), git force operations, docker system prune, kubectl delete --all, kill -9 -1.","snippet":"// RE2 has no negative lookahead:\n// SQL DELETE without WHERE is post-filter\nvar (\n  deleteFromPattern=regexp.MustCompile(\n    `(?i)\\bDELETE\\s+FROM\\b`)\n  whereClausePattern=regexp.MustCompile(\n    `(?i)\\bWHERE\\b`)\n)\n// Scan: match both, flag if WHERE absent","meta":{"patterns":"17 rules + DELETE post-filter","critical":"wipefs, DROP, TRUNCATE, kubectl --all","high":"shred, git force, docker prune"},"rel":["fail-loud","filter-go","hard-deny"],"notes":["patterns overlap with hardDeny intentionally omitted to avoid redundant matching","DELETE FROM without WHERE uses two-pattern post-filter (same RE2 workaround as exfil)","rm -rf / is covered by hardDeny and intentionally absent here"]},
+"exfil-go":{"title":"filter/exfil.go","code":"ExfilFilter + isLocalHost","body":"Detects outbound data transfer. External URL and scp/rsync destination detection uses a match-then-post-filter pattern because RE2 has no negative lookahead: capture the destination host, then call isLocalHost in Go code.","snippet":"// capture host, then post-filter in code\nif m:=urlDestPattern.FindStringSubmatch(cmd);\n  m!=nil && !isLocalHost(m[1]) {\n  findings=append(findings,Finding{\n    Detail:\"outbound transfer to external URL: \"+m[1],\n  })\n}","meta":{"patterns":"urlDestPattern, sshDestPattern, dnsTxtPattern","local":"RFC1918 + loopback + .local + .localhost","severity":"high for external hosts"},"rel":["destructive-go","filter-go","is-local-host"],"notes":["RFC1918 addresses treated as local to avoid flagging internal administration","dig TXT @external-resolver also caught (DNS tunneling indicator)","base64 piped to network tool is critical-severity regardless of destination"]},
+"is-local-host":{"title":"isLocalHost + isLocalIP","code":"filter/exfil.go","body":"isLocalHost determines whether a URL host component refers to the local machine. Strips port, handles IPv6 literals, checks a short table of loopback names, then delegates IPs to net.ParseIP and isLocalIP which covers loopback, private, unspecified, and link-local via net.IP methods.","snippet":"func isLocalIP(ipStr string) bool {\n  ip:=net.ParseIP(ipStr)\n  if ip==nil { return false }\n  return ip.IsLoopback()||\n    ip.IsPrivate()||\n    ip.IsUnspecified()||\n    ip.IsLinkLocalUnicast()\n}","meta":{"methods":"IsLoopback, IsPrivate, IsUnspecified, IsLinkLocalUnicast","local hostnames":"localhost, 127.0.0.1, 0.0.0.0, ::1, *.local, *.localhost"},"rel":["exfil-go"],"notes":["ip.IsPrivate covers all three RFC1918 blocks (10/8, 172.16/12, 192.168/16) plus IPv6 ULA",".local and .localhost suffixes cover mDNS and loopback domains","IPv6 literals in brackets: stripped before parsing"]},
+"workdir-go":{"title":"filter/workdir.go","code":"WorkdirFilter","body":"When local.work_dir is set, this filter blocks any argument containing ../ traversal sequences or absolute paths outside the configured directory. Prevents an LLM from reading or writing arbitrary filesystem paths when the policy intends to restrict local exec to a project directory.","meta":{"trigger":"local.work_dir in policy","blocks":"../ and absolute paths outside workdir","added by":"filter.Build from filterCfg.WorkDir"},"rel":["filter-go","main-go"],"notes":["workdir is set from pol.Local.WorkDir in main.go toFilterConfig","not active unless work_dir is configured in policy","absolute paths are checked against HasPrefix(absPath, workDir)"]},
+"custom-go":{"title":"filter/custom.go","code":"LoadCustom","body":"Loads a user-defined rule file at startup. Each line is a pattern with optional function and severity fields. Custom rules are appended to the chain after the built-in modules and obey the same Chain.Block severity thresholds.","meta":{"format":"YAML rule file","loaded by":"filter.Build for each custom[] entry","enabled":"only if Enabled: true and Path set"},"rel":["filter-go","main-go"],"notes":["path must be specified per-rule; relative to cwd at startup","empty Name defaults to the file path","filter.Build returns error if any custom rule file fails to load"]},
+"fail-loud":{"title":"regexp.MustCompile pattern","code":"filter/* -- compile-time constants","body":"Every pattern in the filter modules is a compile-time constant compiled with MustCompile rather than Compile. A bad pattern is a programmer bug that must fail loudly at startup (or init time) rather than silently dropping a security rule at runtime.","snippet":"// from destructive.go\nre:=regexp.MustCompile(\"(?i)\"+d.pattern)\nf.rules=append(f.rules,rule{\n  function:d.function,\n  pattern:re,...\n})\n// panic on bad pattern: never silent","meta":{"used in":"gtfobins, universal, destructive, exfil","alternative":"Compile+error = silently skip rule","risk of Compile":"security hole from missing rule"},"rel":["destructive-go","universal-go","gtfobins-go"],"notes":["the only place Compile (not MustCompile) is used is for user-supplied patterns, which can legitimately be bad","hardDenyRules are also MustCompile via the init-time fused closure","bad patterns in policy denied_patterns return a validation error at request time, not startup"]},
+"code-to-pattern":{"title":"codeToPattern","code":"filter/gtfobins.go","body":"Converts a GTFOBins code example into a regex. Dispatches on technique function name (shell, reverse-shell, file-write, download, library-load) and looks for indicator substrings in the code text to pick a targeted pattern. Falls back to a /bin/sh presence check for shell techniques.","snippet":"switch {\ncase fn==\"shell\"||fn==\"inherit\":\n  return shellPatternFromCode(binary,code)\ncase fn==\"reverse-shell\"||fn==\"bind-shell\":\n  return reverseShellPatternFromCode(binary,code)\ncase fn==\"file-write\":\n  return fileWritePatternFromCode(binary,code)\n...","meta":{"input":"binary name + technique","output":"regexp string or empty","empty":"technique skipped if no pattern derived"},"rel":["gtfobins-go","universal-go"],"notes":["errors from regexp.Compile on derived patterns are silently skipped (not MustCompile -- derived patterns may be malformed from unusual code examples)","per-binary rules are anchored to the binary name via regexp.QuoteMeta","file-read techniques only produce a pattern if the code contains /bin/sh (otherwise too broad)"]},
+"runner-go":{"title":"runner/runner.go","code":"Runner struct + Exec","body":"Runner wires together Policy, Logger, Filters, OutputStats, ResultCache, BufStore, and HostInfoCache. Exec validates via allowlist then runs the filter chain then SSH-execs. ExecLocal uses guardrail mode. ExecRaw bypasses policy for internal use (host_info, find_files).","snippet":"func (r *Runner) Exec(ctx context.Context,\n  host,command string,...) RunResult {\n  resolved:=r.Policy.ResolvedPolicy(host)\n  v:=policy.ValidateCommand(\n    command,resolved,policy.ModeAllowlist)\n  if !v.Allowed { return RunResult{...} }\n  findings:=r.Filters.Block(command)\n  if len(findings)>0 { return RunResult{...} }\n  // ... ssh.Exec\n}","meta":{"loc":"374","batch":"BatchExec shares SSH pool","raw":"ExecRaw for internal probing"},"rel":["policy-go","filter-go","bufstore-go","cache-go","hostinfo-go"],"notes":["BatchResult carries Succeeded/Failed/Blocked counts separately","ExecRaw intended only for server-constructed commands (shellQuote on all inputs)","formatFindings names the module and function for single findings; joint string for multiple"]},
+"bufstore-go":{"title":"bufstore/bufstore.go","code":"Store -- ring buffer","body":"Session-scoped ring buffer keyed by random buf_ids. Holds the full pre-truncation output when the MCP layer truncates a result. Slice() supports byte-range paging. Grep() filters by regex. FIFO eviction at 64 entries.","snippet":"func (s *Store) Put(content string) string {\n  id:=newID() // 8 hex from crypto/rand\n  s.mu.Lock()\n  if len(s.order)>=s.maxEntries {\n    oldest:=s.order[0]\n    s.order=s.order[1:]\n    delete(s.entries,oldest)\n  }\n  s.entries[id]=content\n  s.order=append(s.order,id)\n  return id\n}","meta":{"default max":"64 entries","id":"8 hex chars (4 bytes)","eviction":"FIFO oldest"},"rel":["handle-message","output-go","cache-go"],"notes":["Slice bounds-checks against content length and guards against integer overflow at end = offset+length","crypto/rand failure panics: a zero-value ID would alias buffers","buf:// URIs are listed in resources/list dynamically from BufStore.IDs()"]},
+"cache-go":{"title":"cache/result.go","code":"ResultCache","body":"TTL-based result cache keyed on (host, NUL, command). On Put it opportunistically evicts any other expired entries to bound memory without a separate goroutine. Invalidate and Flush allow the model to force fresh results via cache_invalidate tool.","snippet":"func key(host,command string) string {\n  return host+\"\\x00\"+command\n}\n// NUL is safe in Go strings and\n// cannot appear in shell commands","meta":{"key":"host NUL command","TTL":"30s default (--cache-ttl override)","thread-safe":"sync.Mutex"},"rel":["runner-go","bufstore-go","handle-message"],"notes":["cached results carry the original CacheHash (sha256 of stdout+stderr) for dedup detection","timed-out results are never cached","RunResult.Cached=true indicates a cache hit to the model"]},
+"hostinfo-go":{"title":"hostinfo/hostinfo.go","code":"Fingerprint + Cache","body":"Runs a small probe bundle over SSH (via injected ExecFunc to stay SSH-free itself): /etc/os-release, uname, $SHELL, package manager detection, and a for loop checking 13 common tools. Results cached 30 minutes by default.","snippet":"out,_,_=exec(ctx,host,\n  `for pm in apt dnf yum pacman apk brew zypper;\n   do which $pm 2>/dev/null && break; done`)\n// first match wins","meta":{"probes":"5 commands","tools checked":"python3 node go cargo docker kubectl helm rg fd git make gcc","TTL":"30m default"},"rel":["runner-go","handle-message"],"notes":["ExecFunc injection keeps the package dependency-free from the SSH package","partial data is useful; individual probe errors are ignored","parseOSRelease prefers PRETTY_NAME, falls back to NAME+VERSION_ID, then uname -s -r"]},
+"output-go":{"title":"output/process.go","code":"StripANSI + truncate","body":"Process applies ANSI stripping then head+tail truncation. StripANSI byte-scans for ESC before touching the regex; clean output returns unchanged without a regex call. The truncator uses a ring buffer of newline offsets to find the tail without splitting into lines.","snippet":"// ANSI: byte scan first (fast path)\nfunc StripANSI(s string) string {\n  if strings.IndexByte(s,0x1b)<0 {\n    return s // no ESC, skip regex\n  }\n  return ansiPattern.ReplaceAllString(s,\"\")\n}","meta":{"default max":"8192 chars","head":"64 lines","tail":"16 lines","Tracker":"atomic counters"},"rel":["truncate-ring","runner-go","bufstore-go"],"notes":["ansiPattern covers CSI sequences, OSC sequences, and simple two-byte escapes","Tracker.Record is called with raw and output lengths; SavingsPct = (raw-out)/raw","stats://session resource exposes the Tracker snapshot"]},
+"truncate-ring":{"title":"ring-buffer truncator","code":"output/process.go:truncate","body":"Keeps head and tail lines without splitting the string into a []string first. Walks bytes to count newlines and track the last (tail+1) newline offsets in a ring buffer. O(n) in the string length, O(tail) space.","snippet":"// ring tracks last tail+1 newline offsets\nring:=make([]int,tail+1)\nfor i:=0;i<len(s);i++ {\n  if s[i]!='\\n' { continue }\n  newlineCount++\n  if newlineCount==head { headEnd=i+1 }\n  ring[ringIdx]=i\n  ringIdx=(ringIdx+1)%len(ring)\n}","meta":{"space":"O(tail+1)","time":"O(n)","output":"head + omit message + tail"},"rel":["output-go"],"notes":["ringFilled tracks whether the ring is full before using the oldest slot","strings.Split(s, \"\\n\") returns newlineCount+1 entries; lineCount = newlineCount+1","omitted count printed as: ... N lines omitted ..."]},
+"atomicfile-go":{"title":"atomicfile/atomicfile.go","code":"WriteWithBackup","body":"Writes data to a temp file in the same directory then renames atomically via natefinch/atomic (which uses ReplaceFile on Windows and rename on Unix). WriteWithBackup first copies any existing file to path.unix-time.bak so an interrupted upgrade leaves a recoverable backup.","snippet":"func WriteWithBackup(path string,\n  data []byte, perm os.FileMode) (\n  backup string, err error) {\n  existing,rerr:=os.ReadFile(path)\n  if rerr==nil {\n    backup=fmt.Sprintf(\"%s.%d.bak\",\n      path,time.Now().Unix())\n    os.WriteFile(backup,existing,0o600)\n  }\n  return backup, Write(path,data,perm)\n}","meta":{"dep":"natefinch/atomic","backup":"path.unixtime.bak","perm":"0o600 for backup, caller-specified for main"},"rel":["mcpconfig-register","wizard-go"],"notes":["non-NotExist read errors abort: never overwrite a config that failed to read","Write (without backup) used by mcpconfig when no existing file is present","wizard reports backup filename in status bar after save"]},
+"wizard-go":{"title":"wizard/model.go","code":"bubbletea TUI wizard","body":"The model struct holds the policy, form state, and a viewport for the live YAML preview. Layout is 55/45 split by terminal width. recompute() marshals the policy to YAML via policyio and sets the viewport content on every update.","snippet":"func (m *model) layout() {\n  leftOuter:=(m.width-gap)*55/100\n  m.leftW=max(leftOuter-4,12)\n  m.rightW=max(m.width-gap-leftOuter-4,12)\n  m.bodyH=max(m.height-6,6)\n}","meta":{"dep":"charmbracelet/bubbletea, huh, lipgloss","screens":"scrMenu, scrForm, scrResult","menu items":"7"},"rel":["mcpconfig-register","duration-type","atomicfile-go"],"notes":["huh forms bind directly to policy fields for boolean/select; scratch strings for duration and comma-list","aborting a local/filters/output form still marks dirty because huh binds live before StateAborted","highlightYAML applies lipgloss styles to keys and comments for the preview pane"]},
+"mcpconfig-client":{"title":"mcpconfig/client.go","code":"Registry() -- 7 clients","body":"Returns the ordered list of MCP clients. Each Client specifies its JSON key, path function, scope, and detection binary. VS Code is the outlier with Key: 'servers' instead of 'mcpServers' and project scope to .vscode/mcp.json. Claude Code uses a CLI path when available.","snippet":"// VS Code: different key and project scope\n{\n  Name:\"vscode\",Key:\"servers\",\n  Scope:ScopeProject,\n  PathFn:func(_Env,ctx PathCtx)(string,error){\n    return filepath.Join(ctx.RepoRoot,\n      \".vscode\",\"mcp.json\"),nil\n  },\n},","meta":{"clients":"claude-desktop, claude-code, cursor, windsurf, cline, vscode, lmstudio","outlier":"vscode: Key=servers, project scope","cli path":"claude-code via claude mcp add-json"},"rel":["mcpconfig-merge","mcpconfig-register","wizard-go"],"notes":["cline lives in VS Code global storage under saoudrizwan.claude-dev","claude-code UseCLI: true triggers claude mcp add-json path when claude binary found","lmstudio has empty LookPath -- always offered regardless of detection"]},
+"mcpconfig-merge":{"title":"mcpconfig/merge.go","code":"Merge + MergeNested","body":"Safe JSON merge using json.RawMessage at each level so unrelated keys survive byte-for-byte. Merge handles flat top-level keys. MergeNested navigates a path like ['projects', '/abs/cwd', 'mcpServers'], creating intermediate objects as needed, then bubbles re-marshaled values back up.","snippet":"// preserve siblings via RawMessage at each level\nvar top map[string]json.RawMessage\njson.Unmarshal(existing,&top)\nvar sub map[string]json.RawMessage\njson.Unmarshal(top[key],&sub)\nsub[serverName]=json.RawMessage(entryBytes)\ntop[key]=json.RawMessage(subBytes)","meta":{"preserves":"all unrelated keys at all levels","conflict":"Overwrite or Skip","output":"indented + trailing newline"},"rel":["mcpconfig-register","mcpconfig-client"],"notes":["MergeNested builds a chain[] of maps from root to leaf, then re-marshals bottom-up","empty or whitespace-only existing data is treated as {} not an error","changed=false and original returned on Skip when entry exists"]},
+"mcpconfig-register":{"title":"mcpconfig/register.go","code":"Register + RegisterAll","body":"Reads the existing config, merges via Merge or MergeNested based on client flags, then writes atomically with backup. A genuine IsNotExist starts fresh; any other read error aborts. Action is one of: created, merged, skipped, overwritten, cli, error.","snippet":"data,err:=opts.ReadFile(path)\nif err!=nil {\n  if !os.IsNotExist(err) {\n    // abort: do not overwrite\n    // a config we failed to read\n    result.Action=\"error\"\n    return result\n  }\n  data=[]byte{}\n}","meta":{"actions":"created, merged, skipped, overwritten, cli, error","atomic":"atomicfile.WriteWithBackup","conflict":"Overwrite default in wizard"},"rel":["mcpconfig-merge","mcpconfig-client","atomicfile-go"],"notes":["RegisterOpts allows injecting ReadFile and WriteAtom for testing","claude-code with CLI available uses claude mcp add-json instead of file surgery","RegisterAll iterates clients in order; each result is independent"]},
+"filter-chain":{"title":"filter.Chain","code":"filter/filter.go:Chain","body":"Ordered list of active Filter modules with severity-based blocking. Block() runs all filters and returns only findings at critical or high severity. Scan() returns everything for audit logging. The default block set (critical, high) can be overridden via NewChain.","snippet":"// Chain.Block: only blocking-severity findings\nfunc (c *Chain) Block(cmd string) []Finding {\n  all:=c.Scan(cmd)\n  var blocked []Finding\n  for _,f:=range all {\n    if c.blockSeverities[f.Severity]{\n      blocked=append(blocked,f)\n    }\n  }\n  return blocked\n}","meta":{"default block":"critical, high","modules":"gtfobins, destructive, exfil, workdir, custom","thread-safe":"no shared mutable state"},"rel":["filter-go","gtfobins-go","destructive-go","exfil-go","runner-go"],"notes":["filter order is: gtfobins first, then destructive, exfil, workdir, custom","medium-severity findings pass through Block and are available via Scan for optional logging","Build() returns an error if any custom filter file fails to load"]},
+"delete-no-where":{"title":"DELETE FROM without WHERE","code":"filter/destructive.go -- post-filter","body":"SQL DELETE without a WHERE clause deletes every row in the table. RE2 has no negative lookahead so this cannot be expressed as a single pattern. DestructiveFilter.Scan uses a two-pattern post-filter: match DELETE FROM, then check separately that WHERE is absent.","snippet":"// RE2: no negative lookahead\nvar (\n  deleteFromPattern=regexp.MustCompile(\n    `(?i)\\bDELETE\\s+FROM\\b`)\n  whereClausePattern=regexp.MustCompile(\n    `(?i)\\bWHERE\\b`)\n)\n// Scan: flag if FROM matched but WHERE absent","meta":{"technique":"match-then-post-filter","severity":"high","same pattern used":"exfil isLocalHost"},"rel":["destructive-go","exfil-go"],"notes":["the same RE2 workaround appears in ExfilFilter for external-URL and scp-destination detection","DELETE WHERE 1=1 is caught by a separate literal pattern at critical severity","DELETE FROM ... WHERE is allowed through by this check"]}}
+</script>
+
+<script>
+(()=>{
+  const D = JSON.parse(document.getElementById('reference-data').textContent);
+  const card = document.getElementById('margin-card');
+  const els = {
+    t: document.getElementById('m-title'),
+    c: document.getElementById('m-code'),
+    b: document.getElementById('m-body'),
+    sn: document.getElementById('m-snippet'),
+    m: document.getElementById('m-meta'),
+    r: document.getElementById('m-rel'),
+    n: document.getElementById('m-notes'),
+    l: document.getElementById('m-links'),
+    s: card.querySelector('.margin-status')
+  };
+  const unpinBtn = document.getElementById('margin-unpin');
+  let pinnedKey = null;
+
+  function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));}
+  function host(u){try{return new URL(u).hostname.replace(/^www\./,'');}catch(e){return '';}}
+
+  function paint(k){
+    const x = D[k];
+    if(!x) return;
+    els.t.textContent = x.title;
+    els.c.textContent = x.code || '·';
+    els.b.textContent = x.body || '';
+    if(x.snippet){ els.sn.textContent = x.snippet; els.sn.style.display = 'block'; }
+    else { els.sn.style.display = 'none'; }
+    els.m.innerHTML = Object.entries(x.meta||{}).map(([k2,v])=>`<div><strong>${esc(k2)}</strong><span>${esc(v)}</span></div>`).join('');
+    els.r.querySelector('ul').innerHTML = (x.rel||[]).map(r=>{const o=D[r];return o?`<li>&rsaquo; ${esc(o.title)}</li>`:'';}).join('') || '<li class="more">&middot;</li>';
+    els.n.querySelector('ul').innerHTML = (x.notes||[]).map(n=>`<li style="white-space:normal;font-family:inherit;font-size:0.76rem">&middot; ${esc(n)}</li>`).join('') || '<li class="more">&middot;</li>';
+    els.l.querySelector('ul').innerHTML = (x.links||[]).map(L=>`<li class="link-item"><a href="${esc(L.url)}" target="_blank" rel="noopener noreferrer">${esc(L.label)}</a><span class="src">${esc(host(L.url))}</span></li>`).join('') || '<li class="more">&middot;</li>';
+  }
+
+  function setActive(el){
+    document.querySelectorAll('.term.is-active').forEach(x=>{if(x!==el)x.classList.remove('is-active');});
+    if(el) el.classList.add('is-active');
+  }
+  function pin(key, el){
+    pinnedKey = key;
+    paint(key);
+    card.classList.add('is-pinned');
+    els.s.textContent = 'pinned';
+    unpinBtn.style.display = 'inline-block';
+    document.querySelectorAll('.term.is-pinned').forEach(x=>x.classList.remove('is-pinned'));
+    if(el) el.classList.add('is-pinned');
+  }
+  function unpin(){
+    pinnedKey = null;
+    card.classList.remove('is-pinned');
+    els.s.textContent = '';
+    unpinBtn.style.display = 'none';
+    document.querySelectorAll('.term.is-pinned').forEach(x=>x.classList.remove('is-pinned'));
+  }
+
+  document.addEventListener('mouseover', e => {
+    if(pinnedKey) return;
+    const t = e.target.closest('.term');
+    if(!t) return;
+    paint(t.getAttribute('data-term'));
+    setActive(t);
+  });
+
+  document.querySelectorAll('.term').forEach(el => {
+    el.setAttribute('tabindex', '0');
+    el.addEventListener('click', e => {
+      e.preventDefault();
+      const key = el.getAttribute('data-term');
+      if(pinnedKey === key) { unpin(); return; }
+      pin(key, el);
+    });
+    el.addEventListener('keydown', e => {
+      if(e.key === 'Enter' || e.key === ' '){
+        e.preventDefault();
+        const key = el.getAttribute('data-term');
+        if(pinnedKey === key) { unpin(); return; }
+        pin(key, el);
+      }
+    });
+    el.addEventListener('focus', () => { if(!pinnedKey) paint(el.getAttribute('data-term')); });
+  });
+
+  unpinBtn.addEventListener('click', unpin);
+  document.addEventListener('keydown', e => { if(e.key === 'Escape' && pinnedKey) unpin(); });
+
+  const tabs = document.querySelectorAll('#mod-tabs .tab-btn');
+  const rows = document.querySelectorAll('#mod-table tbody tr');
+  tabs.forEach(btn => btn.addEventListener('click', () => {
+    tabs.forEach(b => b.setAttribute('data-active', b === btn ? 'true' : 'false'));
+    const f = btn.getAttribute('data-filter');
+    rows.forEach(r => { r.style.display = (f === 'all' || r.getAttribute('data-mod') === f) ? '' : 'none'; });
+  }));
+})();
+</script>
+</body>
+</html>
