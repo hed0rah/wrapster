@@ -69,7 +69,6 @@ func (s *SSEServer) ListenAndServe() error {
 	mux.HandleFunc("/sse", s.handleSSE)
 	mux.HandleFunc("/message", s.handleMessage)
 
-	fmt.Fprintf(io.Discard, "") // ensure io is used
 	fmt.Printf("wrapster: MCP SSE server listening on %s\n", s.addr)
 
 	srv := &http.Server{
