@@ -63,23 +63,23 @@ Examples:
 `
 
 type config struct {
-	policyPath   string
-	auditPath    string
-	jsonOutput   bool
-	dryRun       bool
-	listMode     bool
-	mcpMode      bool
-	mcpSSEAddr   string
-	mcpHTTPAddr  string
-	authToken    string
-	sshArgs      []string
-	watch        time.Duration
-	host         string
-	command      string
-	cacheTTL     time.Duration
-	hostinfoTTL  time.Duration
-	bufstoreMax  int
-	showVersion  bool
+	policyPath  string
+	auditPath   string
+	jsonOutput  bool
+	dryRun      bool
+	listMode    bool
+	mcpMode     bool
+	mcpSSEAddr  string
+	mcpHTTPAddr string
+	authToken   string
+	sshArgs     []string
+	watch       time.Duration
+	host        string
+	command     string
+	cacheTTL    time.Duration
+	hostinfoTTL time.Duration
+	bufstoreMax int
+	showVersion bool
 }
 
 func main() {
@@ -115,6 +115,11 @@ func main() {
 	pol, err := loadPolicyFromPaths(cfg.policyPath)
 	if err != nil {
 		fatal("policy", err)
+	}
+
+	if trusted := pol.TrustedHosts(); len(trusted) > 0 {
+		fmt.Fprintf(os.Stderr, "wrapster: WARNING trusted (full-shell) hosts: %s\n", strings.Join(trusted, ", "))
+		fmt.Fprintln(os.Stderr, "wrapster: trusted hosts get shell-level access gated only by hard-denies + filters; security depends on the remote account (use non-root, restrict egress).")
 	}
 
 	logger, err := audit.NewLogger(cfg.auditPath)

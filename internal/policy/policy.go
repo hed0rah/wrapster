@@ -1,9 +1,12 @@
 package policy
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -82,7 +85,7 @@ type LocalConfig struct {
 
 	// Command policy (only used in allowlist mode).
 	AllowedCommands []CommandRule `yaml:"allowed_commands"`
-	DeniedPatterns  []string     `yaml:"denied_patterns"`
+	DeniedPatterns  []string      `yaml:"denied_patterns"`
 
 	// Shell operators allowed by default for local (LLMs need pipes, etc.)
 	AllowShellOperators bool `yaml:"allow_shell_operators"`
@@ -90,8 +93,8 @@ type LocalConfig struct {
 	// Environment vars injected into local commands.
 	Environment map[string]string `yaml:"environment"`
 
-	Timeout        Duration      `yaml:"timeout,omitempty"`
-	MaxOutputBytes int           `yaml:"max_output_bytes"`
+	Timeout        Duration `yaml:"timeout,omitempty"`
+	MaxOutputBytes int      `yaml:"max_output_bytes"`
 }
 
 // FilterConfig controls which filter modules are active.
@@ -127,14 +130,21 @@ type HostPolicy struct {
 
 	// Command policy
 	AllowedCommands []CommandRule `yaml:"allowed_commands"`
-	DeniedPatterns  []string     `yaml:"denied_patterns"`
+	DeniedPatterns  []string      `yaml:"denied_patterns"`
 
 	// Execution limits
-	MaxOutputBytes int           `yaml:"max_output_bytes"`
-	Timeout        Duration      `yaml:"timeout,omitempty"`
+	MaxOutputBytes int      `yaml:"max_output_bytes"`
+	Timeout        Duration `yaml:"timeout,omitempty"`
 
 	// shell injection protection -- set to true to allow pipes, semicolons, etc.
 	AllowShellOperators bool `yaml:"allow_shell_operators"`
+
+	// Trusted runs this host in guardrail mode (full shell: pipes, $(), complex
+	// one-liners) instead of the allowlist. Hard-denies and the filter chain
+	// still apply, but this is effectively shell access -- real security then
+	// depends on the remote account's privileges, not on wrapster. Use only on
+	// hosts you fully control.
+	Trusted bool `yaml:"trusted,omitempty"`
 
 	// remote environment -- explicit env vars set before command execution.
 	// Values can reference $PATH etc. to extend rather than replace.
@@ -155,8 +165,8 @@ type CommandRule struct {
 	// Optional argument validation regex. Only used with Command (not Pattern).
 	ArgsPattern string `yaml:"args_pattern"`
 
-	compiled        *regexp.Regexp
-	argsCompiled    *regexp.Regexp
+	compiled     *regexp.Regexp
+	argsCompiled *regexp.Regexp
 }
 
 // Compile pre-compiles regex patterns. Call after loading.
@@ -203,6 +213,34 @@ func (r *CommandRule) Matches(fullCommand string) bool {
 	return true
 }
 
+// envValueBad matches environment values that could inject a command (command
+// substitution or shell control operators). A plain $VAR reference is allowed
+// because extending PATH etc. is the legitimate use of host environment.
+var envValueBad = regexp.MustCompile(`\$\(|` + "`" + `|<\(|>\(|[;&|\n\r]`)
+
+// envKeyBad lists environment keys that hijack the dynamic loader or shell
+// startup and must never be settable from policy.
+var envKeyBad = map[string]bool{
+	"LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "LD_AUDIT": true,
+	"BASH_ENV": true, "ENV": true, "IFS": true, "PROMPT_COMMAND": true,
+	"PERL5OPT": true, "PYTHONSTARTUP": true,
+}
+
+// validateEnvMap rejects dangerous environment entries. Values are
+// shell-interpreted on the remote (so $VAR references are fine), which makes
+// command substitution, operators, and loader-hook keys dangerous.
+func validateEnvMap(where string, env map[string]string) error {
+	for k, v := range env {
+		if envKeyBad[strings.ToUpper(k)] {
+			return fmt.Errorf("in %s: environment key %q is not allowed (loader/startup hijack)", where, k)
+		}
+		if envValueBad.MatchString(v) {
+			return fmt.Errorf("in %s: environment value for %q contains command substitution or shell operators", where, k)
+		}
+	}
+	return nil
+}
+
 // LoadPolicy reads and parses a policy YAML file.
 func LoadPolicy(path string) (*Policy, error) {
 	data, err := os.ReadFile(path)
@@ -211,8 +249,14 @@ func LoadPolicy(path string) (*Policy, error) {
 	}
 
 	var p Policy
-	if err := yaml.Unmarshal(data, &p); err != nil {
-		return nil, fmt.Errorf("parsing policy file: %w", err)
+	// Strict decode: unknown keys are a hard error so an aspirational config
+	// (e.g. workspaces/profiles/capabilities this version does not implement)
+	// fails loudly instead of being silently ignored, which would give a false
+	// sense of what is actually enforced.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&p); err != nil && err != io.EOF {
+		return nil, fmt.Errorf("parsing policy file (unknown or malformed field): %w", err)
 	}
 
 	// Reserved name check.
@@ -242,6 +286,19 @@ func LoadPolicy(path string) (*Policy, error) {
 		if _, err := regexp.Compile(pat); err != nil {
 			return nil, fmt.Errorf("in local.denied_patterns: bad pattern %q: %w", pat, err)
 		}
+	}
+
+	// Reject environment entries that could inject commands or hijack the loader.
+	if err := validateEnvMap("defaults", p.Defaults.Environment); err != nil {
+		return nil, err
+	}
+	for name, hp := range p.Hosts {
+		if err := validateEnvMap("host "+name, hp.Environment); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateEnvMap("local", p.Local.Environment); err != nil {
+		return nil, err
 	}
 
 	// Default local mode.
@@ -324,6 +381,9 @@ func (p *Policy) ResolvedPolicy(host string) HostPolicy {
 	if hp.AllowShellOperators {
 		resolved.AllowShellOperators = true
 	}
+	if hp.Trusted {
+		resolved.Trusted = true
+	}
 
 	// SSH options: merge, host overrides win.
 	if len(hp.SSHOptions) > 0 {
@@ -350,6 +410,19 @@ func (p *Policy) ResolvedPolicy(host string) HostPolicy {
 	resolved.DeniedPatterns = append(resolved.DeniedPatterns, hp.DeniedPatterns...)
 
 	return resolved
+}
+
+// TrustedHosts returns the sorted names of hosts running in trusted (full-shell)
+// mode, for a startup security warning.
+func (p *Policy) TrustedHosts() []string {
+	var out []string
+	for name, hp := range p.Hosts {
+		if hp.Trusted {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // copyStringMap returns a shallow copy of m, or nil if m is nil.

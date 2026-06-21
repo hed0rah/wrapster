@@ -61,7 +61,14 @@ func (r *Runner) OutputConfig() output.Config {
 // Exec validates and runs a command on a remote host via SSH.
 func (r *Runner) Exec(ctx context.Context, host, command string, extraSSHArgs []string) RunResult {
 	resolved := r.Policy.ResolvedPolicy(host)
-	validation := policy.ValidateCommand(command, resolved, policy.ModeAllowlist)
+	mode := policy.ModeAllowlist
+	if resolved.Trusted {
+		// trusted host: full shell. guardrail validation keeps the hard-denies
+		// and the filter chain, but allows pipes, redirects, and substitution.
+		mode = policy.ModeGuardrail
+		resolved.AllowShellOperators = true
+	}
+	validation := policy.ValidateCommand(command, resolved, mode)
 
 	if !validation.Allowed {
 		r.Logger.Log(audit.Entry{
@@ -245,7 +252,14 @@ func (r *Runner) ExecLocal(ctx context.Context, command string) RunResult {
 // Validate checks a command without executing it (includes filters).
 func (r *Runner) Validate(host, command string) RunResult {
 	resolved := r.Policy.ResolvedPolicy(host)
-	validation := policy.ValidateCommand(command, resolved, policy.ModeAllowlist)
+	mode := policy.ModeAllowlist
+	if resolved.Trusted {
+		// trusted host: full shell. guardrail validation keeps the hard-denies
+		// and the filter chain, but allows pipes, redirects, and substitution.
+		mode = policy.ModeGuardrail
+		resolved.AllowShellOperators = true
+	}
+	validation := policy.ValidateCommand(command, resolved, mode)
 
 	if !validation.Allowed {
 		return RunResult{
@@ -273,11 +287,11 @@ func (r *Runner) Validate(host, command string) RunResult {
 
 // BatchResult holds results for a batch of commands.
 type BatchResult struct {
-	Results    []RunResult `json:"results"`
-	TotalMs    int64       `json:"total_ms"`
-	Succeeded  int         `json:"succeeded"`
-	Failed     int         `json:"failed"`
-	Blocked    int         `json:"blocked"`
+	Results   []RunResult `json:"results"`
+	TotalMs   int64       `json:"total_ms"`
+	Succeeded int         `json:"succeeded"`
+	Failed    int         `json:"failed"`
+	Blocked   int         `json:"blocked"`
 }
 
 // BatchExec runs multiple commands on a remote host sequentially.

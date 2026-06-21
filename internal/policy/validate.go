@@ -58,6 +58,27 @@ func splitSegments(cmd string) []string {
 	return out
 }
 
+// ifsPattern matches ${IFS}/$IFS, used to replace whitespace and fragment
+// keywords so that \s-based deny patterns no longer match.
+var ifsPattern = regexp.MustCompile(`\$\{?IFS\}?`)
+
+// normalizeForMatch rewrites ${IFS}/$IFS to a space so the hard-deny patterns
+// cannot be split by it. Used only for matching; the unmodified command is what
+// executes (the remote shell performs the same expansion, so this is faithful).
+func normalizeForMatch(cmd string) string {
+	return ifsPattern.ReplaceAllString(cmd, " ")
+}
+
+// obfuscationPattern matches evasion-only constructs rejected in EVERY mode:
+// ANSI-C quoting ($'\x72\x6d') and IFS reassignment (IFS=,) exist only to
+// smuggle bytes past a string validator and have no legitimate use here.
+var obfuscationPattern = regexp.MustCompile(`\$'|(^|[;|&\s])IFS\s*=`)
+
+// fragmentPattern matches keyword-splitting tricks rejected in ALLOWLIST mode:
+// mid-word empty strings (r”m), backslash escapes (r\m), and comma brace
+// expansion ({rm,-rf,/}). These only exist to defeat an allowlist.
+var fragmentPattern = regexp.MustCompile(`[A-Za-z]['"]{2}[A-Za-z]|[A-Za-z]\\[A-Za-z]|\{[^}]*,[^}]*\}`)
+
 // hardDenyRule pairs a raw pattern (for error messages) with its compiled
 // form (used only on the slow path when the fused regex below has already
 // confirmed a match).
@@ -70,16 +91,18 @@ type hardDenyRule struct {
 // Kept as individual rules so the deny reason can name the specific pattern
 // that triggered, but only consulted when hardDenyFused has matched.
 var hardDenyRules = []hardDenyRule{
-	{raw: `\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+){1,4}/`},                         // rm -rf / (any short-flag order)
-	{raw: `\brm\b.*\s--(recursive|force)\b.*\s/`},                              // rm --recursive/--force ... /
-	{raw: `>\s*/dev/(sd[a-z]|nvme\d+n\d+|vd[a-z]|xvd[a-z]|mmcblk\d+|mapper/)`}, // write to raw disk
-	{raw: `\bdd\b.*\bof\s*=\s*/dev/`},                                          // dd to device
-	{raw: `\bmkfs\b`},                                                          // format filesystem
-	{raw: `:\(\)\s*\{\s*:\|:&\s*\}\s*;:`},                                      // fork bomb
-	{raw: `/etc/(passwd|shadow|sudoers)`},                                      // sensitive files
-	{raw: `\bchmod\s+.*777\b`},                                                 // world-writable (octal)
-	{raw: `\bchmod\s+.*[oa]\+w`},                                               // world-writable (symbolic)
-	{raw: `\b(curl|wget|fetch)\b.*\|\s*(sudo\s+)?(sh|bash|dash|zsh|ksh|fish|python[0-9.]*|perl|ruby|node)\b`}, // download | interpreter
+	{raw: `\bfind\b[^|;&]*\s-delete\b`}, // find ... -delete (recursive wipe). rm is handled by dangerousRm.
+	{raw: `\bmv\b[^|;&]*\s/dev/null\b`}, // mv a tree onto /dev/null
+	{raw: `>\s*/dev/(sd[a-z]|nvme\d+n\d+|vd[a-z]|xvd[a-z]|mmcblk\d+|mapper/|mem|kmsg|port)`}, // write to device
+	{raw: `\bdd\b.*\bof\s*=\s*/dev/`},                               // dd to device
+	{raw: `\b(mkfs|mke2fs|mkswap|newfs)\b`},                         // format filesystem
+	{raw: `[\w:]*\(\)\s*\{\s*[\w:]*\s*\|\s*[\w:]*\s*&`},             // fork bomb (named or :)
+	{raw: `/dev/(tcp|udp)/`},                                        // bash net redirect (reverse shell)
+	{raw: `/etc/(passwd|shadow|sudoers)`},                           // sensitive files
+	{raw: `(>|>>|\btee\b[^|;&]*?)\s*/etc/(crontab|cron\.|hosts)\b`}, // write to system cron/hosts
+	{raw: `\bchmod\s+.*777\b`},                                      // world-writable (octal)
+	{raw: `\bchmod\s+.*[oa]\+w`},                                    // world-writable (symbolic)
+	{raw: `\b(curl|wget|fetch)\b.*\|&?\s*(sudo\s+)?(sh|bash|dash|zsh|ksh|fish|python[0-9.]*|perl|ruby|node)\b`}, // download | interpreter
 }
 
 // hardDenyFused alternates every hardDenyRule pattern so a single DFA pass
@@ -94,6 +117,27 @@ var hardDenyFused = func() *regexp.Regexp {
 	}
 	return regexp.MustCompile("(?i)" + strings.Join(parts, "|"))
 }()
+
+// rm with BOTH recursive and force flags (any order or position) aimed at a
+// system path, home, root, or a bare glob is catastrophic. Expressed in code
+// because it is an AND of three conditions a single RE2 pattern cannot express
+// (this is what catches flag-after-target forms like `rm /etc -rf`).
+var (
+	rmCmdPat       = regexp.MustCompile(`(?i)\brm\b`)
+	rmRecursivePat = regexp.MustCompile(`(?i)(^|\s)(-[a-z]*r[a-z]*|--recursive)\b`)
+	rmDangerTgtPat = regexp.MustCompile(`(?i)(\s|=)(/|~|\$HOME)(\s|$)|(\s|=)/(etc|usr|var|bin|boot|lib|lib64|root|home|sys|proc|opt|srv)(/?(\s|$)|/\*)|--no-preserve-root`)
+)
+
+func dangerousRm(cmd string) bool {
+	// catastrophic = a recursive delete aimed at root, a home, or a system
+	// top-level directory. force (-f) is irrelevant to the danger so it is not
+	// required; a bare `*` glob is intentionally NOT flagged (too common in
+	// legitimate cleanup like `rm -rf build/*`).
+	if !rmCmdPat.MatchString(cmd) || !rmRecursivePat.MatchString(cmd) {
+		return false
+	}
+	return rmDangerTgtPat.MatchString(cmd)
+}
 
 // ValidationResult holds the outcome of command validation.
 type ValidationResult struct {
@@ -112,13 +156,25 @@ func ValidateCommand(cmd string, hp HostPolicy, mode ValidationMode) ValidationR
 		return ValidationResult{Allowed: false, Reason: "empty command"}
 	}
 
-	// Hard denies -- always blocked, no override, regardless of mode.
-	// One fused DFA pass replaces N sequential matches; only when it hits
-	// do we walk the rules to identify which pattern triggered.
-	if hardDenyFused.MatchString(cmd) {
+	// Reject evasion-only constructs (ANSI-C quoting, IFS reassignment) in every
+	// mode -- they exist only to smuggle bytes past string validation.
+	if obfuscationPattern.MatchString(cmd) {
+		return ValidationResult{
+			Allowed: false,
+			Reason:  "rejected: ANSI-C quoting ($'...') or IFS reassignment (command obfuscation)",
+		}
+	}
+
+	// Hard denies -- always blocked, no override, regardless of mode (an
+	// accident/catastrophe net that holds even in trusted mode). Matched against
+	// the ${IFS}-normalized command so whitespace tricks cannot fragment a rule.
+	// One fused DFA pass replaces N sequential matches; only when it hits do we
+	// walk the rules to identify which pattern triggered.
+	norm := normalizeForMatch(cmd)
+	if hardDenyFused.MatchString(norm) {
 		matched := "dangerous pattern"
 		for i := range hardDenyRules {
-			if hardDenyRules[i].re.MatchString(cmd) {
+			if hardDenyRules[i].re.MatchString(norm) {
 				matched = hardDenyRules[i].raw
 				break
 			}
@@ -126,6 +182,12 @@ func ValidateCommand(cmd string, hp HostPolicy, mode ValidationMode) ValidationR
 		return ValidationResult{
 			Allowed: false,
 			Reason:  fmt.Sprintf("hard-denied: matches dangerous pattern %q", matched),
+		}
+	}
+	if dangerousRm(norm) {
+		return ValidationResult{
+			Allowed: false,
+			Reason:  "hard-denied: recursive force rm targeting a system path, home, or root",
 		}
 	}
 
@@ -164,6 +226,14 @@ func ValidateCommand(cmd string, hp HostPolicy, mode ValidationMode) ValidationR
 	}
 
 	// Allowlist mode -- must match at least one rule.
+	// Reject keyword-fragmenting obfuscation that only exists to defeat an
+	// allowlist (empty-string r''m, backslash r\m, brace {rm,-rf,/}).
+	if fragmentPattern.MatchString(cmd) {
+		return ValidationResult{
+			Allowed: false,
+			Reason:  "obfuscation (empty-string, backslash, or brace expansion) is not allowed in allowlist mode",
+		}
+	}
 	// Command substitution can smuggle an un-allowlisted sub-command inside an
 	// allowed one and cannot be validated per-segment, so reject it outright.
 	if cmdSubstPattern.MatchString(cmd) {

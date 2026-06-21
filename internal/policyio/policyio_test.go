@@ -158,6 +158,9 @@ func TestLoadForEditMissing(t *testing.T) {
 
 	// LoadForEdit("") in an empty temp directory should return DefaultPolicy with nil error.
 	tmpDir := t.TempDir()
+	// isolate from the real home config so the default search finds nothing.
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 	oldCwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd failed: %v", err)
