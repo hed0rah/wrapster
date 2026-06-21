@@ -82,7 +82,18 @@ wrapster --json local "uname -a"
 wrapster --mcp --policy /path/to/policy.yaml
 ```
 
-### SSE (LM Studio, Gemma, HTTP clients)
+### Streamable HTTP (modern: Cursor, Claude Code `--transport http`)
+
+```bash
+wrapster --mcp-http :8080 --policy /path/to/policy.yaml
+# optional bearer auth (env preferred over the flag, which leaks via ps):
+WRAPSTER_AUTH_TOKEN=secret wrapster --mcp-http :8080 --policy /path/to/policy.yaml
+```
+
+The MCP 2025-03-26 transport: single `POST/DELETE /mcp` endpoint, `Mcp-Session-Id`
+sessions, loopback Origin guard. See [docs/transports.md](docs/transports.md).
+
+### SSE (legacy: LM Studio, older HTTP clients)
 
 ```bash
 wrapster --mcp-sse :8080 --policy /path/to/policy.yaml
@@ -169,8 +180,12 @@ Allow by default, block on detection. Five built-in filter modules:
 - **workdir**: when `work_dir` is set, blocks absolute paths outside the directory, `..` traversal, and `cd` escapes (not a security boundary -- a focus guardrail)
 - **custom**: load your own rule files with regex patterns and severity levels
 
-Hard denies (always blocked regardless of policy):
-`rm -rf /`, `dd of=/dev/*`, `curl|sh`, `wget|sh`, `/etc/shadow`, `/etc/passwd`, `chmod 777`, `mkfs`
+Hard denies (always blocked, every mode, no override): recursive `rm` of system
+paths/home/root in any flag order, `find -delete`, `dd`/`mkfs` to devices,
+`/dev/tcp` reverse shells, fork bombs, `curl|sh`, reads of `/etc/shadow`, writes
+to `/etc/crontab`, world-writable `chmod`, and more. Obfuscation that only exists
+to dodge these (`$IFS`, `$'\x..'`, `{rm,-rf,/}`, `r''m`) is rejected. Full list
+and rationale: [docs/security-model.md](docs/security-model.md).
 
 ### SSH commands (allowlist mode)
 
@@ -182,6 +197,22 @@ Deny by default. A command must match an `allowed_commands` rule to run.
 - **No interactive shell**: `-T` and `BatchMode=yes` always set
 - **Audit log**: every attempt logged as JSON with timestamp, host, command, result, output SHA-256
 - **Connection pooling**: on Unix, SSH connections are multiplexed via ControlMaster (60s idle timeout). Repeated commands to the same host reuse a single connection.
+
+### Trusted hosts (full shell)
+
+Set `trusted: true` on a host to run it in guardrail mode: full shell (pipes,
+`$()`, one-liners), gated only by the always-on hard-denies + filters. This is
+*shell access* -- string validation is a friction layer, not a boundary, so
+security depends on the remote account (non-root, restricted egress). wrapster
+prints a startup warning listing trusted hosts. See [docs/security-model.md](docs/security-model.md).
+
+### Strict policy parsing
+
+Unknown policy keys are a hard error, so a policy can never silently mean less
+than it says (no aspirational `workspaces`/`profiles` that look enforced but
+aren't). Host `environment` values are validated too: `$VAR` extension is
+allowed; command substitution and loader-hijack keys (`LD_PRELOAD`, ...) are
+rejected.
 
 ## Flags
 
@@ -195,7 +226,9 @@ Deny by default. A command must match an `allowed_commands` rule to run.
 | `--ssh-args <args>` | `-s` | Extra SSH args (comma-separated) |
 | `--watch <duration>` | `-w` | Poll interval (e.g. `30s`, `1m`) |
 | `--mcp` | | MCP server over stdio |
-| `--mcp-sse <addr>` | | MCP server over HTTP SSE |
+| `--mcp-http <addr>` | | MCP server over Streamable HTTP |
+| `--auth-token <tok>` | | Bearer token for `--mcp-http` (or `WRAPSTER_AUTH_TOKEN`) |
+| `--mcp-sse <addr>` | | MCP server over HTTP SSE (legacy) |
 | `--cache-ttl <dur>` | | Result cache TTL (default: `30s`) |
 | `--hostinfo-ttl <dur>` | | Host info cache TTL (default: `30m`) |
 | `--bufstore-max <n>` | | Max output buffer entries (default: `64`) |

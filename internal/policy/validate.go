@@ -75,7 +75,7 @@ func normalizeForMatch(cmd string) string {
 var obfuscationPattern = regexp.MustCompile(`\$'|(^|[;|&\s])IFS\s*=`)
 
 // fragmentPattern matches keyword-splitting tricks rejected in ALLOWLIST mode:
-// mid-word empty strings (r”m), backslash escapes (r\m), and comma brace
+// mid-word empty strings (r''m), backslash escapes (r\m), and comma brace
 // expansion ({rm,-rf,/}). These only exist to defeat an allowlist.
 var fragmentPattern = regexp.MustCompile(`[A-Za-z]['"]{2}[A-Za-z]|[A-Za-z]\\[A-Za-z]|\{[^}]*,[^}]*\}`)
 

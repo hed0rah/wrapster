@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1.0" />
 <title>wrapster codebase explorer / dev</title>
-<meta name="description" content="Source-level reference for wrapster: MCP transport internals, policy validation, filter chain, bufstore paging, and the config wizard." />
+<meta name="description" content="Source-level reference for wrapster: MCP transport internals, security model, policy validation, filter chain, bufstore paging, and the config wizard." />
 <meta property="og:title" content="wrapster codebase explorer / dev" />
 <meta property="og:type" content="article" />
 <style>
@@ -149,7 +149,7 @@ code{font-family:"SFMono-Regular","SF Mono",Menlo,Consolas,monospace;font-size:0
     <div class="stat"><div class="num">9</div><div class="lbl">MCP tools</div></div>
     <div class="stat"><div class="num">3</div><div class="lbl">MCP transports</div></div>
     <div class="stat"><div class="num">5</div><div class="lbl">filter modules</div></div>
-    <div class="stat"><div class="num">73</div><div class="lbl">tests passing</div></div>
+    <div class="stat"><div class="num">85</div><div class="lbl">tests passing</div></div>
   </div>
 
   <h2>Source tree</h2>
@@ -278,10 +278,10 @@ internal/
   </div>
 
   <h2>Data flow: a command through the security stack</h2>
-  <p>Every command, regardless of transport, passes through the same ordered checks. Hard denies run first on a <span class="term" data-term="hard-deny">fused DFA</span>, then mode-specific policy, then the <span class="term" data-term="filter-chain">filter chain</span>.</p>
+  <p>Every command, regardless of transport, passes through the same ordered checks. <span class="term" data-term="obfuscation-pattern">Obfuscation rejection</span> and <span class="term" data-term="ifs-normalize">IFS normalization</span> run first, then the <span class="term" data-term="hard-deny">fused DFA</span>, then mode-specific policy, then the <span class="term" data-term="filter-chain">filter chain</span>.</p>
 
   <div class="figure">
-  <svg viewBox="0 0 740 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="command validation pipeline">
+  <svg viewBox="0 0 740 230" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="command validation pipeline">
     <defs><marker id="ar3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--accent-deep,#1d3d1a)"/></marker>
     <marker id="ar4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--accent-hot,#2d6626)"/></marker></defs>
     <style>
@@ -293,58 +293,70 @@ internal/
       .fl2{stroke:var(--accent-deep,#1d3d1a);stroke-width:1;fill:none;marker-end:url(#ar3)}
       .fle{stroke:var(--accent-hot,#2d6626);stroke-width:1;fill:none;marker-end:url(#ar4);stroke-dasharray:4 3}
     </style>
-    <rect class="bx2" x="8" y="74" width="68" height="36"/><text class="lb2" x="16" y="88">command</text><text class="sm2" x="16" y="100">string</text>
-    <path class="fl2" d="M76,92 L100,92"/>
 
-    <rect class="bx2h" x="102" y="60" width="94" height="60"/>
-    <text class="lb2" x="112" y="76">hardDenyFused</text>
-    <text class="sm2" x="112" y="90">one DFA pass</text>
-    <text class="sm2" x="112" y="102">10 patterns</text>
-    <text class="sm2" x="112" y="114">rm -rf /, fork bomb...</text>
+    <!-- command in -->
+    <rect class="bx2" x="8" y="88" width="66" height="36"/><text class="lb2" x="14" y="102">command</text><text class="sm2" x="14" y="114">string</text>
+    <path class="fl2" d="M74,106 L92,106"/>
 
-    <path class="fle" d="M149,60 L149,30"/>
-    <text class="sm2" x="106" y="24">DENIED</text>
+    <!-- obfuscation + IFS normalize -->
+    <rect class="bx2h" x="94" y="72" width="100" height="66"/>
+    <text class="lb2" x="104" y="87">obfuscation</text>
+    <text class="sm2" x="104" y="99">reject $'...' ANSI-C</text>
+    <text class="sm2" x="104" y="111">reject IFS=, assign</text>
+    <text class="sm2" x="104" y="123">normalize ${IFS} -&gt; sp</text>
+    <path class="fle" d="M144,72 L144,44"/>
+    <text class="sm2" x="102" y="38">DENIED</text>
 
-    <path class="fl2" d="M196,90 L220,90"/>
+    <path class="fl2" d="M194,106 L212,106"/>
 
-    <rect class="bx2h" x="222" y="60" width="108" height="60"/>
-    <text class="lb2" x="232" y="76">mode check</text>
-    <text class="sm2" x="232" y="90">guardrail: allow</text>
-    <text class="sm2" x="232" y="102">unless denied_patterns</text>
-    <text class="sm2" x="232" y="114">allowlist: must match rule</text>
+    <!-- hardDenyFused -->
+    <rect class="bx2h" x="214" y="72" width="100" height="66"/>
+    <text class="lb2" x="224" y="87">hardDenyFused</text>
+    <text class="sm2" x="224" y="99">one DFA pass</text>
+    <text class="sm2" x="224" y="111">12 rules + dangerousRm</text>
+    <text class="sm2" x="224" y="123">rm -rf /, fork bomb...</text>
+    <path class="fle" d="M264,72 L264,44"/>
+    <text class="sm2" x="224" y="38">DENIED</text>
 
-    <path class="fle" d="M276,60 L276,30"/>
-    <text class="sm2" x="244" y="24">DENIED</text>
+    <path class="fl2" d="M314,106 L332,106"/>
 
-    <path class="fl2" d="M330,90 L354,90"/>
+    <!-- mode check -->
+    <rect class="bx2h" x="334" y="72" width="106" height="66"/>
+    <text class="lb2" x="344" y="87">mode check</text>
+    <text class="sm2" x="344" y="99">guardrail: allow</text>
+    <text class="sm2" x="344" y="111">unless denied_patterns</text>
+    <text class="sm2" x="344" y="123">allowlist: match rule</text>
+    <path class="fle" d="M387,72 L387,44"/>
+    <text class="sm2" x="349" y="38">DENIED</text>
 
-    <rect class="bx2h" x="356" y="60" width="108" height="60"/>
-    <text class="lb2" x="366" y="76">filter chain</text>
-    <text class="sm2" x="366" y="90">gtfobins universal</text>
-    <text class="sm2" x="366" y="102">+ per-binary rules</text>
-    <text class="sm2" x="366" y="114">destructive, exfil, workdir</text>
+    <path class="fl2" d="M440,106 L458,106"/>
 
-    <path class="fle" d="M410,60 L410,30"/>
-    <text class="sm2" x="370" y="24">BLOCKED</text>
+    <!-- filter chain -->
+    <rect class="bx2h" x="460" y="72" width="106" height="66"/>
+    <text class="lb2" x="470" y="87">filter chain</text>
+    <text class="sm2" x="470" y="99">gtfobins + universal</text>
+    <text class="sm2" x="470" y="111">destructive, exfil</text>
+    <text class="sm2" x="470" y="123">workdir, custom</text>
+    <path class="fle" d="M513,72 L513,44"/>
+    <text class="sm2" x="473" y="38">BLOCKED</text>
 
-    <path class="fl2" d="M464,90 L488,90"/>
+    <path class="fl2" d="M566,106 L584,106"/>
 
-    <rect class="bx2r" x="490" y="64" width="110" height="52"/>
-    <text class="lb2" x="500" y="82">ALLOWED</text>
-    <text class="sm2" x="500" y="96">SSH exec or</text>
-    <text class="sm2" x="500" y="108">local exec</text>
+    <!-- allowed -->
+    <rect class="bx2r" x="586" y="80" width="100" height="52"/>
+    <text class="lb2" x="596" y="100">ALLOWED</text>
+    <text class="sm2" x="596" y="114">SSH or local exec</text>
 
-    <path class="fl2" d="M600,90 L624,90"/>
-    <rect class="bx2h" x="626" y="64" width="100" height="52"/>
-    <text class="lb2" x="636" y="82">output</text>
-    <text class="sm2" x="636" y="96">ANSI strip</text>
-    <text class="sm2" x="636" y="108">head+tail truncate</text>
+    <!-- allowlist note -->
+    <text class="sm2" x="336" y="158">allowlist: each segment</text>
+    <text class="sm2" x="336" y="170">must match independently</text>
 
-    <!-- allowlist segment split annotation -->
-    <text class="sm2" x="224" y="145">allowlist: each operator-separated</text>
-    <text class="sm2" x="224" y="157">segment must match independently</text>
+    <!-- trusted note -->
+    <text class="sm2" x="94" y="185">trusted: true host</text>
+    <text class="sm2" x="94" y="197">-&gt; guardrail mode (shell ok)</text>
+    <text class="sm2" x="94" y="209">hard-deny + filters still run</text>
   </svg>
-  <div class="cap">fig. 2: SSH exec uses allowlist mode; local exec uses guardrail by default. hard denies are unconditional in both modes. the filter chain catches exploit classes policy cannot enumerate by name.</div>
+  <div class="cap">fig. 2: obfuscation rejection and $IFS normalization run before everything. hard denies are unconditional in both modes. trusted hosts take the guardrail path but still hit hard-deny and the filter chain.</div>
   </div>
 
   <h2>Module reference</h2>
@@ -364,11 +376,14 @@ internal/
       <tr data-mod="mcp"><td><span class="term" data-term="streamhttp-go">mcp/streamhttp.go</span></td><td>Streamable HTTP (2025-03-26)</td><td>POST /mcp returns JSON directly; DELETE closes session; <span class="term" data-term="loopback-guard">loopback origin guard</span> against DNS rebinding; bearer token via <code>subtle.ConstantTimeCompare</code></td></tr>
       <tr data-mod="mcp"><td><span class="term" data-term="handle-message">handleMessage (server.go)</span></td><td>JSON-RPC dispatcher</td><td>9 MCP tools, resources/read, prompts/get, ping; all three transports call this</td></tr>
       <tr data-mod="policy"><td><span class="term" data-term="policy-go">policy/policy.go</span></td><td>config types + loader</td><td><span class="term" data-term="resolved-policy">ResolvedPolicy</span> deep-copies maps/slices to avoid concurrent-dispatch races; <span class="term" data-term="duration-type">Duration type</span> round-trips "30s" through yaml.v3</td></tr>
-      <tr data-mod="policy"><td><span class="term" data-term="validate-go">policy/validate.go</span></td><td>command validation</td><td><span class="term" data-term="hard-deny">hardDenyFused</span> one-pass DFA; <span class="term" data-term="segment-split">allowlist segment splitting</span>; <span class="term" data-term="cmd-subst">cmdSubstPattern</span> blocks <code>$()</code> and backticks in allowlist mode</td></tr>
-      <tr data-mod="policy"><td><span class="term" data-term="runner-go">runner/runner.go</span></td><td>execution orchestrator</td><td>Runner struct wires policy + filters + caches; Exec uses allowlist, ExecLocal uses guardrail; BatchExec shares SSH connection pool</td></tr>
+      <tr data-mod="policy"><td><span class="term" data-term="validate-go">policy/validate.go</span></td><td>command validation</td><td><span class="term" data-term="hard-deny">hardDenyFused</span> one-pass DFA (12 rules + <span class="term" data-term="dangerous-rm">dangerousRm</span>); <span class="term" data-term="obfuscation-pattern">obfuscationPattern</span> and <span class="term" data-term="ifs-normalize">ifsPattern</span> run before the DFA; <span class="term" data-term="fragment-pattern">fragmentPattern</span> in allowlist; <span class="term" data-term="segment-split">segment splitting</span></td></tr>
+      <tr data-mod="policy"><td><span class="term" data-term="env-validate">policy/policy.go:validateEnvMap</span></td><td>environment value guard</td><td>rejects command substitution and shell operators in env values; blocks loader-hook keys (<code>LD_PRELOAD</code>, <code>BASH_ENV</code>, <code>IFS</code>, <code>PROMPT_COMMAND</code>, ...); plain <code>$VAR</code> references allowed</td></tr>
+      <tr data-mod="policy"><td><span class="term" data-term="known-fields">LoadPolicy strict parse</span></td><td>strict YAML decode</td><td><code>yaml.Decoder.KnownFields(true)</code> makes unknown keys a hard error; aspirational config cannot masquerade as enforced policy</td></tr>
+      <tr data-mod="policy"><td><span class="term" data-term="trusted-mode">HostPolicy.Trusted</span></td><td>trusted host guardrail</td><td><code>trusted: true</code> routes a host through ModeGuardrail and enables shell operators; hard-deny + filter chain still run; startup warning via <code>TrustedHosts()</code></td></tr>
+      <tr data-mod="policy"><td><span class="term" data-term="runner-go">runner/runner.go</span></td><td>execution orchestrator</td><td>Runner struct wires policy + filters + caches; Exec selects ModeGuardrail when <code>resolved.Trusted</code>; ExecLocal uses guardrail; BatchExec shares SSH connection pool</td></tr>
       <tr data-mod="filter"><td><span class="term" data-term="filter-go">filter/filter.go</span></td><td>filter interface + chain</td><td>Chain.Block returns only findings at critical/high severity; Chain.Scan returns all for auditing</td></tr>
-      <tr data-mod="filter"><td><span class="term" data-term="gtfobins-go">filter/gtfobins.go</span></td><td>GTFOBins knowledge base</td><td>embedded <code>gtfobins.json</code>; universal patterns + per-binary rules extracted from code examples via <span class="term" data-term="code-to-pattern">codeToPattern</span></td></tr>
-      <tr data-mod="filter"><td><span class="term" data-term="universal-go">filter/universal.go</span></td><td>cross-binary exploit classes</td><td>shell spawn (40+ language variants), reverse shells, /dev/tcp, privilege escalation, evasion patterns; <span class="term" data-term="fail-loud">regexp.MustCompile</span> throughout</td></tr>
+      <tr data-mod="filter"><td><span class="term" data-term="gtfobins-go">filter/gtfobins.go</span></td><td>GTFOBins knowledge base</td><td>embedded <code>gtfobins.json</code>; universal patterns + per-binary rules via <span class="term" data-term="code-to-pattern">codeToPattern</span>; <span class="term" data-term="wrapper-bins">wrapperBins</span> strips sudo/env/timeout/nice/... so per-binary rules fire on the real program</td></tr>
+      <tr data-mod="filter"><td><span class="term" data-term="universal-go">filter/universal.go</span></td><td>cross-binary exploit classes</td><td>shell spawn (40+ language variants), reverse shells, /dev/tcp, privilege escalation, evasion; broadened pipe-to-shell (<code>|&amp;</code>, path-prefix forms), socat <code>exec:</code> colon form, <code>eval $</code>, <code>xargs</code>-to-shell; <span class="term" data-term="fail-loud">regexp.MustCompile</span> throughout</td></tr>
       <tr data-mod="filter"><td><span class="term" data-term="destructive-go">filter/destructive.go</span></td><td>destructive operation detector</td><td>SQL DROP/TRUNCATE, git force push/reset, docker prune, kubectl delete --all; <span class="term" data-term="delete-no-where">DELETE without WHERE</span> via post-filter (RE2 has no negative lookahead)</td></tr>
       <tr data-mod="filter"><td><span class="term" data-term="exfil-go">filter/exfil.go</span></td><td>exfiltration detector</td><td>external URL/scp/DNS match-then-post-filter: capture host, call <span class="term" data-term="is-local-host">isLocalHost</span>; RFC1918 treated as local</td></tr>
       <tr data-mod="filter"><td><span class="term" data-term="workdir-go">filter/workdir.go</span></td><td>working directory escape guard</td><td>blocks <code>../</code> traversal and absolute paths outside <code>local.work_dir</code></td></tr>
@@ -384,6 +399,40 @@ internal/
     </tbody>
   </table>
 
+  <h2>Security model</h2>
+
+  <h3>The honest position</h3>
+  <ul class="bul">
+    <li>wrapster validates the command <em>text</em>. The shell executes a <em>parse tree</em> derived from that text after quoting, expansion, and substitution. These are different objects. Every shell rewrite feature opens a gap: <code>cat${IFS}/etc/shadow</code>, <code>r''m -rf /</code>, <code>{rm,-rf,/}</code>, <code>$'\x72\x6d'</code> all bypass naive string matching.</li>
+    <li>The consequence: once a mode allows command substitution and arbitrary one-liners, <strong>string validation is a friction layer, not a security boundary</strong>. A model that understands bash can reconstruct any blocked command. wrapster does not pretend otherwise -- it offers two modes with very different guarantees and labels them plainly.</li>
+    <li>The real security boundary for <span class="term" data-term="trusted-mode">trusted hosts</span> is the remote OS account. wrapster logs a startup warning listing every host where <code>trusted: true</code> is set via <code>TrustedHosts()</code>, then prints explicit guidance to harden the remote account.</li>
+  </ul>
+
+  <h3>Allowlist mode: a real boundary</h3>
+  <ul class="bul">
+    <li>Deny by default. Every operator-separated segment must match an <code>allowed_commands</code> rule. Shell metacharacters are blocked by <code>shellOperatorPattern</code> unless <code>allow_shell_operators: true</code>.</li>
+    <li><span class="term" data-term="obfuscation-pattern">Obfuscation rejection</span> runs first in all modes: ANSI-C quoting (<code>$'\x72\x6d'</code>) and IFS reassignment (<code>IFS=,</code>) are evasion-only constructs with no legitimate use and are rejected outright.</li>
+    <li><span class="term" data-term="ifs-normalize">$IFS normalization</span> rewrites <code>${IFS}</code>/<code>$IFS</code> to a space before the hard-deny patterns run, so <code>rm${IFS}-rf${IFS}/</code> cannot slip a whitespace-based rule.</li>
+    <li><span class="term" data-term="fragment-pattern">fragmentPattern</span> blocks keyword-splitting tricks in allowlist mode: mid-word empty strings (<code>r''m</code>), backslash escapes (<code>r\m</code>), comma brace expansion (<code>{rm,-rf,/}</code>). These exist only to defeat an allowlist.</li>
+    <li><span class="term" data-term="cmd-subst">Command substitution</span> (<code>$()</code>, backticks, <code>&lt;()</code>) is unconditionally blocked in allowlist mode because it hides an un-validated sub-command.</li>
+    <li><span class="term" data-term="segment-split">Segment splitting</span>: with operators on, each <code>;&amp;|</code>-separated segment must independently match a rule. An allowlisted <code>uptime</code> cannot drag <code>; curl attacker.com</code> through.</li>
+    <li>Do not allowlist GTFOBins-class interpreters (<code>python</code>, <code>perl</code>, <code>awk</code>, <code>find</code>, <code>vim</code>, <code>xargs</code>) on a constrained host -- they are shells in disguise.</li>
+  </ul>
+
+  <h3>Trusted mode: full shell, honestly labelled</h3>
+  <ul class="bul">
+    <li>A host with <span class="term" data-term="trusted-mode"><code>trusted: true</code></span> runs <code>ModeGuardrail</code> instead of <code>ModeAllowlist</code>. Pipes, redirects, <code>$()</code>, and complex one-liners are allowed. This is, by design, equivalent to giving the LLM an <code>ssh user@host bash</code> session.</li>
+    <li>The <span class="term" data-term="hard-deny">hard-deny catastrophe net</span> and the <span class="term" data-term="filter-chain">filter chain</span> still run in trusted mode. They catch accidents; they do not stop a determined or prompt-injected model.</li>
+    <li><code>runner.Exec</code> and <code>runner.Validate</code> both check <code>resolved.Trusted</code> and switch mode before calling <code>ValidateCommand</code>.</li>
+  </ul>
+
+  <h3>Supporting hardening</h3>
+  <ul class="bul">
+    <li><span class="term" data-term="env-validate">validateEnvMap</span> runs at policy load time. Values containing <code>$()</code>, backticks, or <code>;&amp;|</code> are rejected. Loader-hook keys (<code>LD_PRELOAD</code>, <code>LD_LIBRARY_PATH</code>, <code>BASH_ENV</code>, <code>IFS</code>, <code>PROMPT_COMMAND</code>, <code>PERL5OPT</code>, <code>PYTHONSTARTUP</code>) are denied. Plain <code>$VAR</code> references like <code>PATH: /opt/bin:$PATH</code> are allowed.</li>
+    <li><span class="term" data-term="known-fields">Strict policy parsing</span> uses <code>yaml.NewDecoder</code> with <code>KnownFields(true)</code>. An unknown key is a hard error so an aspirational config (unimplemented keys) fails loudly instead of being silently ignored with a false sense of enforcement.</li>
+    <li>The SSH command is passed as one argv element via <code>exec.Command</code> with no local <code>sh -c</code> wrapper, so there is no second local round of word-splitting between validation and execution.</li>
+  </ul>
+
   <h2>Policy system deep dive</h2>
 
   <h3>Two validation modes</h3>
@@ -396,8 +445,10 @@ internal/
 
   <h3>Hard denies</h3>
   <ul class="bul">
-    <li><span class="term" data-term="hard-deny">hardDenyFused</span> alternates all 10 individual patterns into one compiled regex so a single DFA pass answers "does any dangerous pattern match?" instead of running 10 sequential MatchString calls. The slow-path individual rules only run when fused fires, to name which one triggered.</li>
-    <li>Patterns include: <code>rm -rf /</code> in any short-flag order, <code>dd of=/dev/*</code>, raw disk writes, <code>mkfs</code>, fork bomb, <code>/etc/passwd|shadow|sudoers</code>, <code>chmod 777</code>, world-writable symbolic, and download-pipe-to-interpreter. These are unconditional in both modes.</li>
+    <li><span class="term" data-term="hard-deny">hardDenyFused</span> alternates all 12 individual patterns into one compiled regex so a single DFA pass answers "does any dangerous pattern match?" instead of running 12 sequential MatchString calls. The slow-path individual rules only run when fused fires, to name which one triggered.</li>
+    <li>The 12 <code>hardDenyRules</code> cover: <code>find ... -delete</code>, <code>mv .../dev/null</code>, writes to raw devices (<code>/dev/sd*</code>, <code>/dev/nvme*</code>, <code>/dev/mem</code>, <code>/dev/kmsg</code>), <code>dd of=/dev/</code>, filesystem formatters (<code>mkfs</code>, <code>mke2fs</code>, <code>mkswap</code>, <code>newfs</code>), generalized fork bomb, <code>/dev/tcp/</code> and <code>/dev/udp/</code>, <code>/etc/passwd|shadow|sudoers</code>, system cron/hosts writes, <code>chmod 777</code>, world-writable symbolic, and download-pipe-to-interpreter.</li>
+    <li><span class="term" data-term="dangerous-rm">dangerousRm</span> is a separate three-condition check (not a single regex) because RE2 cannot express the AND of recursive flag, any flag order, and system-path target simultaneously. It catches flag-after-target forms like <code>rm /etc -rf</code>.</li>
+    <li>Both hard-deny checks run on the <span class="term" data-term="ifs-normalize">$IFS-normalized</span> command string, so whitespace tricks cannot fragment a rule keyword.</li>
     <li>Destructive-filter patterns intentionally omit the hard-deny cases to avoid redundant matching; policy runs first and would already have blocked them.</li>
   </ul>
 
@@ -486,9 +537,10 @@ internal/
     <div class="ref-row"><span class="key">gtfobins</span><span class="val"><a href="https://gtfobins.github.io" target="_blank" rel="noopener">gtfobins.github.io</a><span class="desc">binary escape and privilege escalation knowledge base</span></span></div>
     <div class="ref-row"><span class="key">mcp 2025-03-26</span><span class="val"><a href="https://modelcontextprotocol.io/specification/2025-03-26/basic/transports" target="_blank" rel="noopener">Streamable HTTP transport spec</a><span class="desc">Mcp-Session-Id, POST/DELETE /mcp, optional SSE streaming</span></span></div>
     <div class="ref-row"><span class="key">internal</span><span class="val">docs/transports.md<span class="desc">transport comparison and migration notes, same repo</span></span></div>
+    <div class="ref-row"><span class="key">internal</span><span class="val">docs/security-model.md<span class="desc">two-mode security design, bypass taxonomy, honest-position framing, same repo</span></span></div>
   </div>
 
-  <div class="footer"><span class="signoff">wrapster codebase explorer</span> &middot; dev &middot; 2026-06-16 &middot; hover any dotted term for source detail</div>
+  <div class="footer"><span class="signoff">wrapster codebase explorer</span> &middot; dev &middot; 2026-06-21 &middot; hover any dotted term for source detail</div>
 </article>
 
 <aside class="margin">
@@ -526,7 +578,15 @@ internal/
 "loopback-guard":{"title":"loopbackOrigin","code":"mcp/streamhttp.go:loopbackOrigin","body":"Browser-set Origin headers must target localhost or 127.0.0.1 or ::1. Non-browser MCP clients send no Origin and are allowed. This closes DNS-rebinding attacks where a hostile page calls the local HTTP server from the user's browser.","snippet":"func loopbackOrigin(origin string) bool {\n  if origin==\"\" { return true }\n  u,_:=url.Parse(origin)\n  switch u.Hostname() {\n  case \"localhost\",\"127.0.0.1\",\"::1\":\n    return true\n  }\n  return false\n}","meta":{"applies to":"--mcp-http only","vector":"DNS rebinding via browser"},"rel":["streamhttp-go"],"notes":["CORS headers set Access-Control-Allow-Origin to the (loopback) origin, not *","prevents a malicious webpage from proxying tool calls to the local wrapster instance"]},
 "policy-go":{"title":"policy/policy.go","code":"Policy struct + LoadPolicy","body":"Top-level config: Defaults HostPolicy, Hosts map, Local LocalConfig, Filters FilterConfig, Output OutputConfig. LoadPolicy reads YAML, validates reserved host names, compiles all regexes at load time, and sets defaults for guardrail mode and output processing.","snippet":"// default output if none specified\nif !p.Output.ANSIStrip && ... {\n  p.Output=OutputConfig{\n    ANSIStrip:true,\n    Truncate:OutputTruncateConfig{\n      Enabled:true,\n      MaxChars:8192,\n      HeadLines:64,TailLines:16},\n  }\n}","meta":{"loc":"365","format":"YAML","module":"gopkg.in/yaml.v3"},"rel":["resolved-policy","duration-type","command-rule","validate-go"],"notes":["\"local\" is a reserved host name; policy load returns error if present","all regex compilation happens at load, not per-call; bad patterns fail fast","default local mode is guardrail with shell operators permitted"]},
 "validate-go":{"title":"policy/validate.go","code":"ValidateCommand + hardDeny","body":"Core validation function. Order: (1) hardDenyFused one-pass DFA, (2) shellOperatorPattern, (3) denied_patterns, (4) guardrail shortcut, (5) cmdSubstPattern, (6) Pattern rules, (7) per-segment allowlist. Each stage returns early on denial.","snippet":"// fused DFA: one pass for all 10 patterns\nif hardDenyFused.MatchString(cmd) {\n  for i:=range hardDenyRules {\n    if hardDenyRules[i].re.MatchString(cmd){\n      matched=hardDenyRules[i].raw\n      break\n    }\n  }\n  return ValidationResult{Allowed:false,...}\n}","meta":{"loc":"274","modes":"ModeAllowlist, ModeGuardrail","hard denies":"10 patterns"},"rel":["hard-deny","segment-split","cmd-subst","policy-go"],"notes":["compiledDeniedCache caches user-defined denied_patterns regexes via sync.Map","AuditPolicy checks allowed_commands against GTFOBins and returns level-tagged warnings","ruleLabel picks description, then Command, then Pattern for the deny reason"]},
-"hard-deny":{"title":"hardDenyFused","code":"policy/validate.go:hardDenyFused","body":"A fused alternation of all 10 hard-deny patterns compiled into one regex at package init time. A single MatchString call answers the question for all patterns combined; the slow-path individual rules only run when fused fires.","snippet":"var hardDenyFused=func() *regexp.Regexp {\n  parts:=make([]string,len(hardDenyRules))\n  for i:=range hardDenyRules {\n    hardDenyRules[i].re=regexp.MustCompile(\n      \"(?i)\"+hardDenyRules[i].raw)\n    parts[i]=\"(?:\"+hardDenyRules[i].raw+\")\"\n  }\n  return regexp.MustCompile(\n    \"(?i)\"+strings.Join(parts,\"|\"))\n}()","meta":{"patterns":"10","technique":"alternation fused DFA","cost":"one MatchString vs 10"},"rel":["validate-go","destructive-go"],"notes":["pattern names include: rm-rf-root, write-raw-disk, dd-device, mkfs, fork-bomb, shadow/sudoers, chmod-777, world-writable, download-pipe-interp","case-insensitive (?i) flag applied to the fused pattern","individual rules also carry compiled form for the slow-path name lookup"]},
+"hard-deny":{"title":"hardDenyFused","code":"policy/validate.go:hardDenyFused","body":"A fused alternation of all 12 hard-deny patterns compiled into one regex at package init time. A single MatchString call answers the question for all patterns combined; the slow-path individual rules only run when fused fires to name which one triggered.","snippet":"var hardDenyFused=func() *regexp.Regexp {\n  parts:=make([]string,len(hardDenyRules))\n  for i:=range hardDenyRules {\n    hardDenyRules[i].re=regexp.MustCompile(\n      \"(?i)\"+hardDenyRules[i].raw)\n    parts[i]=\"(?:\"+hardDenyRules[i].raw+\")\"\n  }\n  return regexp.MustCompile(\n    \"(?i)\"+strings.Join(parts,\"|\"))\n}()","meta":{"patterns":"12 in fused DFA","also":"dangerousRm (3-condition AND)","cost":"one MatchString vs 12"},"rel":["validate-go","destructive-go","dangerous-rm","ifs-normalize"],"notes":["12 rules: find-delete, mv-devnull, raw-device write, dd-device, mkfs family, fork bomb, /dev/tcp|udp, shadow/sudoers, cron/hosts write, chmod-777, world-writable, download-pipe-interp","case-insensitive (?i) applied to both the fused pattern and each individual rule","runs on the ifsPattern-normalized command string to defeat whitespace tricks"]},
+"dangerous-rm":{"title":"dangerousRm","code":"policy/validate.go:dangerousRm","body":"Three-condition check for catastrophic recursive rm. A single RE2 regex cannot express the AND of (has rm), (has -r flag in any position/order), and (targets a system path, home, or root). The function checks each condition separately so flag-after-target forms like rm /etc -rf are caught.","snippet":"func dangerousRm(cmd string) bool {\n  if !rmCmdPat.MatchString(cmd) ||\n    !rmRecursivePat.MatchString(cmd) {\n    return false\n  }\n  return rmDangerTgtPat.MatchString(cmd)\n}\n// rmDangerTgtPat: /(etc|usr|var|bin|...)\n// rmRecursivePat: -[a-z]*r[a-z]* | --recursive","meta":{"conditions":"3 (cmd, recursive flag, target)","flag order":"any: rm -rf / AND rm / -rf","does not flag":"rm -rf ./build, rm -rf /var/log/x"},"rel":["hard-deny","validate-go"],"notes":["rmDangerTgtPat matches /, ~, $HOME, and top-level system dirs but not deep paths","--no-preserve-root is caught regardless of target","force flag (-f) is deliberately not required: recursive to root is catastrophic with or without -f"]},
+"obfuscation-pattern":{"title":"obfuscationPattern","code":"policy/validate.go:obfuscationPattern","body":"Matches ANSI-C quoting ($'...') and IFS reassignment (IFS=,). These constructs exist only to smuggle bytes past a string validator: $'\\x72\\x6d' decodes to rm, and IFS reassignment lets the attacker control word-splitting. Both are rejected in every mode before anything else runs.","snippet":"// rejected in ALL modes before hard-deny\nvar obfuscationPattern=regexp.MustCompile(\n  `\\$'|(^|[;|&\\s])IFS\\s*=`)\n\nif obfuscationPattern.MatchString(cmd) {\n  return ValidationResult{\n    Allowed:false,\n    Reason:\"ANSI-C quoting or IFS reassignment\",\n  }\n}","meta":{"matches":"$'...' and IFS=","mode":"all modes, first check","legitimate use":"none in this context"},"rel":["validate-go","ifs-normalize","fragment-pattern","hard-deny"],"notes":["$'\\x72\\x6d' decodes to rm at the shell level; validator must see rm to deny it","IFS reassignment lets attacker change word-split character to evade whitespace-based rules","runs before $IFS normalization and before hardDenyFused"]},
+"ifs-normalize":{"title":"normalizeForMatch / ifsPattern","code":"policy/validate.go:normalizeForMatch","body":"ifsPattern matches ${IFS} and $IFS. normalizeForMatch replaces them with a literal space so hard-deny and dangerousRm patterns see rm -rf / instead of rm${IFS}-rf${IFS}/. The original unmodified command string is what actually executes -- the normalization is only for matching.","snippet":"var ifsPattern=regexp.MustCompile(`\\$\\{?IFS\\}?`)\n\nfunc normalizeForMatch(cmd string) string {\n  return ifsPattern.ReplaceAllString(cmd,\" \")\n}\n// hardDenyFused and dangerousRm\n// both call normalizeForMatch first","meta":{"pattern":"$IFS and ${IFS}","output":"space (same expansion shell does)","scope":"matching only, not execution"},"rel":["validate-go","hard-deny","obfuscation-pattern"],"notes":["faithful to shell semantics: the remote shell also expands $IFS to its value during word-split","does not rewrite IFS=, assignments (those are caught by obfuscationPattern before this runs)","applied to the norm variable; original cmd string unchanged for execution"]},
+"fragment-pattern":{"title":"fragmentPattern","code":"policy/validate.go:fragmentPattern","body":"Rejects keyword-splitting tricks used to defeat an allowlist: mid-word empty strings (r''m -> rm), backslash letter escapes (r\\m -> rm), and comma brace expansion ({rm,-rf,/} -> rm -rf /). These have no legitimate use in an allowlisted command and exist solely to defeat text matching.","snippet":"var fragmentPattern=regexp.MustCompile(\n  `[A-Za-z][\\'\"]{2}[A-Za-z]|[A-Za-z]\\\\[A-Za-z]` +\n  `|\\{[^}]*,[^}]*\\}`)\n// checked in allowlist mode only,\n// after obfuscation and hard-deny","meta":{"matches":"r''m, r\\m, {rm,-rf,/}","mode":"allowlist mode only","runs after":"hardDenyFused"},"rel":["validate-go","obfuscation-pattern","cmd-subst"],"notes":["brace expansion covers multi-element cases like {cat,/etc/shadow} and {chmod,777,/}","the pattern requires at least one comma inside {} to avoid matching legitimate brace literals","runs only in allowlist mode; guardrail allows shell operators so brace expansion may be legitimate"]},
+"trusted-mode":{"title":"HostPolicy.Trusted","code":"policy/policy.go:HostPolicy + runner/runner.go","body":"A host with trusted: true bypasses the allowlist and runs ModeGuardrail, enabling pipes, redirects, and $() substitution. This is equivalent to SSH shell access -- the design acknowledges it plainly. Hard-deny and the filter chain still run. Startup prints a warning via TrustedHosts().","snippet":"// runner.go: Exec + Validate both check Trusted\nif resolved.Trusted {\n  mode=policy.ModeGuardrail\n  resolved.AllowShellOperators=true\n}\nvalidation:=policy.ValidateCommand(\n  command,resolved,mode)","meta":{"field":"HostPolicy.Trusted bool","flag":"yaml: trusted,omitempty","warning":"TrustedHosts() at startup"},"rel":["runner-go","hard-deny","filter-chain","validate-go"],"notes":["TrustedHosts() returns sorted list of trusted host names for the startup warning","the startup warning is printed to stderr before any MCP serve call","hard-deny and filter chain still run in trusted mode -- they catch accidents, not determined attackers"]},
+"env-validate":{"title":"validateEnvMap","code":"policy/policy.go:validateEnvMap","body":"Validates environment values and keys at policy load time. Values containing $() backtick <() >() or shell operators (;&|newline) are rejected. A set of loader-hook keys (LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT, BASH_ENV, ENV, IFS, PROMPT_COMMAND, PERL5OPT, PYTHONSTARTUP) are unconditionally forbidden. Plain $VAR references are allowed.","snippet":"var envValueBad=regexp.MustCompile(\n  `\\$\\(|` + \"`\" + `|<\\(|>\\(|[;&|\\n\\r]`)\nvar envKeyBad=map[string]bool{\n  \"LD_PRELOAD\":true,\"BASH_ENV\":true,\n  \"IFS\":true,\"PROMPT_COMMAND\":true,...\n}\n// plain $VAR allowed: PATH:/opt/bin:$PATH","meta":{"called for":"defaults, each host, local","loader keys":"9 forbidden keys","at":"policy load time, not per-call"},"rel":["policy-go","validate-go","known-fields"],"notes":["host environment values are shell-expanded on the remote, so $() in a value would execute there","key comparison is case-insensitive via strings.ToUpper","error messages name the section (defaults, host X, local) and the offending key"]},
+"known-fields":{"title":"KnownFields strict YAML decode","code":"policy/policy.go:LoadPolicy","body":"LoadPolicy uses yaml.NewDecoder with KnownFields(true) so an unknown key in the policy file is a hard error. This prevents the most dangerous documentation failure: an aspirational config (unimplemented workspaces, profiles, approval gates) that looks enforced but is silently ignored.","snippet":"dec:=yaml.NewDecoder(\n  bytes.NewReader(data))\ndec.KnownFields(true)\nif err:=dec.Decode(&p);\n  err!=nil && err!=io.EOF {\n  return nil,fmt.Errorf(\n    \"unknown or malformed field: %w\",err)\n}","meta":{"package":"gopkg.in/yaml.v3","effect":"unknown key = load error","prevents":"silent ignore of aspirational keys"},"rel":["policy-go","env-validate"],"notes":["io.EOF is excluded from the error check: a policy file with one top-level document returns EOF after the first Decode call, which is correct","KnownFields was added specifically because users were writing unimplemented keys and assuming they were enforced","applies to all top-level sections: defaults, hosts, local, filters, output"]},
+"wrapper-bins":{"title":"wrapperBins","code":"filter/gtfobins.go:wrapperBins + extractBinary","body":"extractBinary skips wrapper binaries when walking command tokens to find the real program. Without this, 'sudo env timeout 5 python -c ...' would key on 'sudo' and miss all python per-binary signatures. The wrapperBins set covers common launchers: sudo, doas, env, nice, ionice, nohup, setsid, stdbuf, timeout, busybox, command, time.","snippet":"var wrapperBins=map[string]bool{\n  \"sudo\":true,\"doas\":true,\"env\":true,\n  \"nice\":true,\"ionice\":true,\n  \"nohup\":true,\"setsid\":true,\n  \"stdbuf\":true,\"timeout\":true,\n  \"busybox\":true,\"command\":true,\"time\":true,\n}\n// also skips -flags, VAR=val, and numeric args","meta":{"size":"12 wrapper names","also skips":"flags (-), env assigns (=), numeric args","result":"first non-wrapper non-flag token"},"rel":["gtfobins-go","universal-go","code-to-pattern"],"notes":["numArgPat skips bare numbers like timeout's duration arg (5, 10, 30)","path-prefixed binaries (/usr/bin/python) are stripped to basename before the wrapperBins check","command not found in wrapperBins and not a flag/assign = the real binary"]},
 "segment-split":{"title":"allowlist segment splitting","code":"policy/validate.go:splitSegments","body":"In allowlist mode, after checking full-command Pattern rules, the command is split on shell control operators (;, |, &, &&, ||, newline) and each segment is validated independently. This prevents an allowlisted command from dragging trailing malicious segments through.","snippet":"var segmentSplitter=regexp.MustCompile(\n  `(?:&&|\\|\\||[;|&\\n\\r])`)\n\nfunc splitSegments(cmd string) []string {\n  parts:=segmentSplitter.Split(cmd,-1)\n  // trim and drop empty segments\n}","meta":{"splits on":";&|&&||| newline","mode":"allowlist only","requires":"allow_shell_operators: true"},"rel":["validate-go","cmd-subst"],"notes":["guardrail mode never reaches segment splitting (returns allowed before)","Pattern rules are checked against the full command first, before splitting","each segment must independently match at least one allowed_commands rule"]},
 "cmd-subst":{"title":"cmdSubstPattern","code":"policy/validate.go:cmdSubstPattern","body":"Rejects command substitution forms $(cmd), backtick, process substitution <(cmd) and >(cmd) in allowlist mode. These embed a sub-command that cannot be validated per-segment, so an attacker could hide disallowed commands inside an allowed wrapper.","snippet":"var cmdSubstPattern=regexp.MustCompile(\n  `\\$\\(|` + \"`\" + `|<\\(|>\\(`)\n// checked in allowlist mode before segments","meta":{"blocks":"$() `` <() >()","mode":"allowlist only","not blocked":"guardrail (shell ops ok)"},"rel":["segment-split","validate-go"],"notes":["Pattern rules (which match the full string) are checked before this gate","guardrail mode allows shell operators by default, so substitution is not blocked there","design decision: allowlist cannot enumerate substituted sub-commands, so block categorically"]},
 "command-rule":{"title":"CommandRule","code":"policy/policy.go:CommandRule","body":"A single allowed-command entry. Either Command (exact binary name, with optional ArgsPattern regex for the rest of the string) or Pattern (full-line regex anchored at both ends with ^ and $). The compiled field is nil for Command rules, non-nil for Pattern rules.","snippet":"func (r *CommandRule) Matches(full string) bool {\n  if r.compiled!=nil {\n    return r.compiled.MatchString(full)\n  }\n  parts:=strings.SplitN(full,\" \",2)\n  if parts[0]!=r.Command { return false }\n  if r.argsCompiled!=nil {\n    return r.argsCompiled.MatchString(args)\n  }\n  return true // any args\n}","meta":{"fields":"Command, Pattern, ArgsPattern, Description","compile":"at LoadPolicy","anchor":"^Pattern$"},"rel":["validate-go","policy-go"],"notes":["ArgsPattern only applies to Command rules, not Pattern rules","Description surfaces in --list output and audit logs","pattern anchoring: ^ and $ are prepended/appended during Compile"]},

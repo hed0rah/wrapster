@@ -1,7 +1,17 @@
 # wrapster policy configuration
 #
-# Deny-by-default: only commands matching an allowed_commands rule will execute.
-# Hard-coded safety rules (rm -rf /, dd to devices, etc.) are always blocked.
+# Two modes per SSH host:
+#   allowlist (default) -- deny by default; only commands matching an
+#     allowed_commands rule run. A real boundary.
+#   trusted: true       -- full shell (pipes, $(), one-liners) via guardrail,
+#     gated only by the always-on hard-deny net + filters. This is shell access;
+#     secure the remote account. See the dev-box example below and
+#     docs/security-model.md.
+#
+# Hard-deny safety rules (recursive rm of system paths, dd to devices, reverse
+# shells, fork bombs, etc.) are ALWAYS blocked, in both modes. Unknown policy
+# keys are a hard error (strict parsing), so a config never silently means less
+# than it says.
 
 defaults:
   # SSH connection defaults (overridable per-host)
@@ -123,3 +133,13 @@ hosts:
       - command: grep
         args_pattern: ".*"
         description: "Search files"
+
+  # A host you fully control and want full shell access on. trusted: true skips
+  # the allowlist (full pipes/substitution) but keeps the hard-deny net + filters.
+  # Only safe when the remote account itself is constrained (non-root, egress).
+  dev-box:
+    user: dev
+    identity_file: ~/.ssh/id_ed25519
+    trusted: true
+    environment:
+      PATH: /opt/tools/bin:$PATH   # $VAR extension is allowed; $(...) is not

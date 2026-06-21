@@ -76,16 +76,33 @@ func (f *GTFObinsFilter) Scan(command string) []Finding {
 	return findings
 }
 
+// wrapperBins are loader/launcher binaries that prefix a real command; they are
+// skipped so per-binary signatures fire on the actual program (e.g. the python
+// rules should still match `sudo env timeout 5 python ...`).
+var wrapperBins = map[string]bool{
+	"sudo": true, "doas": true, "env": true, "nice": true, "ionice": true,
+	"nohup": true, "setsid": true, "stdbuf": true, "timeout": true,
+	"busybox": true, "command": true, "time": true,
+}
+
+var numArgPat = regexp.MustCompile(`^\d+[a-zA-Z]?$`)
+
 func extractBinary(command string) string {
 	parts := strings.Fields(strings.TrimSpace(command))
-	if len(parts) == 0 {
-		return ""
+	for i := 0; i < len(parts); i++ {
+		bin := parts[i]
+		if idx := strings.LastIndex(bin, "/"); idx >= 0 {
+			bin = bin[idx+1:]
+		}
+		// skip wrapper binaries, their flags, env VAR=VAL assignments, and a
+		// wrapper's numeric argument (e.g. `timeout 5`, `nice -n 10`).
+		if wrapperBins[bin] || strings.HasPrefix(parts[i], "-") ||
+			strings.Contains(parts[i], "=") || numArgPat.MatchString(parts[i]) {
+			continue
+		}
+		return bin
 	}
-	bin := parts[0]
-	if idx := strings.LastIndex(bin, "/"); idx >= 0 {
-		bin = bin[idx+1:]
-	}
-	return bin
+	return ""
 }
 
 // --- GTFOBins data loader ---

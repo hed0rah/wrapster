@@ -50,15 +50,15 @@ func compileUniversal() []rule {
 			"vim embedded language execution"},
 		{`\bless\b.*!`, "shell", "high",
 			"less ! shell escape"},
-		{`\bfind\b.*-exec\s+.*\b(sh|bash|dash|zsh|env)\b`, "shell", "critical",
-			"find -exec shell"},
+		{`\bfind\b.*-exec\w*\s+.*\b(sh|bash|dash|zsh|ksh|env|python[0-9.]*|perl|ruby|awk|node)\b`, "shell", "critical",
+			"find -exec interpreter"},
 		{`\b[mgn]?awk\b.*\bsystem\s*\(`, "shell", "critical",
 			"awk system() call"},
 		{`\bexpect\b.*\bspawn\b`, "shell", "critical",
 			"expect spawn"},
 		{`\b(strace|ltrace)\b.*-e\s+inject`, "shell", "critical",
 			"strace/ltrace injection"},
-		{`\|\s*(sh|bash|dash|zsh|ksh)\b`, "shell", "critical",
+		{`\|&?\s*(sudo\s+)?(\S*/)?(sh|bash|dash|zsh|ksh|fish)\b`, "shell", "critical",
 			"pipe to shell"},
 
 		// === REVERSE SHELLS ===
@@ -68,8 +68,8 @@ func compileUniversal() []rule {
 			"netcat reverse shell"},
 		{`\bncat\b.*-e\s+/bin/(sh|bash)`, "reverse-shell", "critical",
 			"ncat reverse shell"},
-		{`\bsocat\b.*exec.*sh`, "reverse-shell", "critical",
-			"socat reverse shell"},
+		{`\bsocat\b.*\bexec[:= ]`, "reverse-shell", "critical",
+			"socat exec reverse shell"},
 		{`\bmkfifo\b`, "reverse-shell", "critical",
 			"named pipe (mkfifo) -- common reverse shell component"},
 		{`socket\.socket.*connect`, "reverse-shell", "critical",
@@ -91,7 +91,7 @@ func compileUniversal() []rule {
 		// === SENSITIVE FILE ACCESS ===
 		// /etc/shadow and /etc/sudoers covered by policy hardDeny
 		// (/etc/(passwd|shadow|sudoers)); not duplicated here.
-		{`\.ssh/id_(rsa|dsa|ecdsa|ed25519)`, "file-read", "high",
+		{`\.ssh/id[_.]`, "file-read", "high",
 			"access to SSH private keys"},
 		{`authorized_keys`, "file-write", "critical",
 			"SSH authorized_keys modification"},
@@ -101,8 +101,10 @@ func compileUniversal() []rule {
 			"base64 decoded payload piped to shell"},
 		{`\becho\b.*\|\s*base64\s+-d\s*\|\s*(sh|bash)`, "shell", "critical",
 			"encoded shell payload"},
-		{`\beval\b.*\$\(`, "shell", "high",
-			"eval with command substitution"},
+		{`\beval\b.*\$`, "shell", "high",
+			"eval with variable or substitution"},
+		{`\bxargs\b.*\b(\S*/)?(sh|bash|dash|zsh)\b`, "shell", "high",
+			"xargs spawning a shell"},
 	}
 
 	rules := make([]rule, 0, len(defs))
