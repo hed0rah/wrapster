@@ -125,7 +125,7 @@ var hardDenyFused = func() *regexp.Regexp {
 var (
 	rmCmdPat       = regexp.MustCompile(`(?i)\brm\b`)
 	rmRecursivePat = regexp.MustCompile(`(?i)(^|\s)(-[a-z]*r[a-z]*|--recursive)\b`)
-	rmDangerTgtPat = regexp.MustCompile(`(?i)(\s|=)(/|~|\$HOME)(\s|$)|(\s|=)/(etc|usr|var|bin|boot|lib|lib64|root|home|sys|proc|opt|srv)(/?(\s|$)|/\*)|--no-preserve-root`)
+	rmDangerTgtPat = regexp.MustCompile(`(?i)(\s|=)(/|~|\$HOME)(\s|$|[;)(&|<>'"` + "`" + `])|(\s|=)/(etc|usr|var|bin|boot|lib|lib64|root|home|sys|proc|opt|srv)/?(\*|\s|$|[;)(&|<>'"` + "`" + `])|--no-preserve-root`)
 )
 
 func dangerousRm(cmd string) bool {
@@ -154,6 +154,17 @@ func ValidateCommand(cmd string, hp HostPolicy, mode ValidationMode) ValidationR
 
 	if cmd == "" {
 		return ValidationResult{Allowed: false, Reason: "empty command"}
+	}
+
+	// Bound input size before any regex or splitting. Real commands are tiny;
+	// RE2 is linear, but linear in megabytes is still a CPU-DoS on a shared hub,
+	// so reject an oversized command outright instead of validating it.
+	const maxCommandLen = 1 << 16 // 64 KiB
+	if len(cmd) > maxCommandLen {
+		return ValidationResult{
+			Allowed: false,
+			Reason:  fmt.Sprintf("command too long: %d bytes (limit %d)", len(cmd), maxCommandLen),
+		}
 	}
 
 	// Reject evasion-only constructs (ANSI-C quoting, IFS reassignment) in every

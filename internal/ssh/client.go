@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hed0rah/wrapster/internal/policy"
+	"github.com/hed0rah/wrapster/internal/proc"
 )
 
 // Result holds the outcome of a remote command execution.
@@ -26,10 +27,10 @@ type Result struct {
 
 // ExecOptions configures a single command execution.
 type ExecOptions struct {
-	Host           string
-	Command        string
-	Policy         policy.HostPolicy
-	ExtraSSHArgs   []string
+	Host         string
+	Command      string
+	Policy       policy.HostPolicy
+	ExtraSSHArgs []string
 }
 
 // Exec runs a validated command on a remote host via the system ssh binary.
@@ -49,6 +50,7 @@ func Exec(ctx context.Context, opts ExecOptions) (*Result, error) {
 
 	sshBin := findSSH()
 	cmd := exec.CommandContext(ctx, sshBin, args...)
+	proc.SetProcGroup(cmd) // on timeout, kill the local ssh process tree
 	// Ensure SSH has the environment it needs. On Windows, Claude Desktop
 	// and other MCP hosts may spawn us with a minimal env that's missing
 	// system vars SSH depends on (like SystemRoot for DLL loading).

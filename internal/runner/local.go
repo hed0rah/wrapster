@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hed0rah/wrapster/internal/policy"
+	"github.com/hed0rah/wrapster/internal/proc"
 )
 
 // localResult mirrors ssh.Result for local commands.
@@ -35,6 +36,7 @@ func execLocal(ctx context.Context, command string, lc policy.LocalConfig) (*loc
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", command)
 	}
+	proc.SetProcGroup(cmd) // on timeout, kill the whole tree, not just the shell
 
 	if lc.WorkDir != "" {
 		cmd.Dir = lc.WorkDir
@@ -102,4 +104,3 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	lw.written += n
 	return n, err
 }
-
