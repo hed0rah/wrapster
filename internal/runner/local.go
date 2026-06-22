@@ -54,8 +54,8 @@ func execLocal(ctx context.Context, command string, lc policy.LocalConfig) (*loc
 	// runs, sanitizing and byte-capping on the fly instead of buffering raw to
 	// completion. nil callback -> accumulate only (the MCP layer wires a live
 	// chunk consumer for streaming).
-	stdout := output.NewStreamWriter(lc.MaxOutputBytes, nil)
-	stderr := output.NewStreamWriter(lc.MaxOutputBytes, nil)
+	stdout := output.NewStreamWriter(lc.MaxOutputBytes, output.SinkFor(ctx, "stdout"))
+	stderr := output.NewStreamWriter(lc.MaxOutputBytes, output.SinkFor(ctx, "stderr"))
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 

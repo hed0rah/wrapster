@@ -58,8 +58,8 @@ func Exec(ctx context.Context, opts ExecOptions) (*Result, error) {
 	// Streaming sinks over the local ssh child's pipes: sanitize and byte-cap on
 	// the fly rather than buffering raw to completion. Same model as local exec
 	// (it is just another exec.Cmd); nil callback accumulates only.
-	stdout := output.NewStreamWriter(opts.Policy.MaxOutputBytes, nil)
-	stderr := output.NewStreamWriter(opts.Policy.MaxOutputBytes, nil)
+	stdout := output.NewStreamWriter(opts.Policy.MaxOutputBytes, output.SinkFor(ctx, "stdout"))
+	stderr := output.NewStreamWriter(opts.Policy.MaxOutputBytes, output.SinkFor(ctx, "stderr"))
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 

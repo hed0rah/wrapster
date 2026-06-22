@@ -182,11 +182,75 @@ func (s *StreamableServer) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A tools/call that opted into progress, from a client that accepts SSE, gets
+	// a streamed text/event-stream response: live notifications first, then the
+	// final result. Everything else stays one-shot JSON.
+	if wantsProgress(&msg) && acceptsEventStream(r) {
+		s.serveSSE(w, sess, &msg)
+		return
+	}
+
 	// A request runs in this handler goroutine; net/http serves other POSTs
 	// (including notifications/cancelled) concurrently, so a long tool call can
 	// still be cancelled mid-flight.
 	resp := handleMessage(s.runner, &msg, sess.cancels, sess.state, dropNotify)
 	writeJSON(w, resp)
+}
+
+// acceptsEventStream reports whether the client will accept an SSE response.
+func acceptsEventStream(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+}
+
+// wantsProgress reports whether a tools/call carries a progressToken, the
+// client's opt-in for mid-flight notifications (progress + streamed output).
+func wantsProgress(msg *jsonrpcMessage) bool {
+	if msg.Method != "tools/call" || msg.Params == nil {
+		return false
+	}
+	var p struct {
+		Meta *struct {
+			ProgressToken any `json:"progressToken"`
+		} `json:"_meta"`
+	}
+	_ = json.Unmarshal(msg.Params, &p)
+	return p.Meta != nil && p.Meta.ProgressToken != nil
+}
+
+// serveSSE runs one request with its response delivered as a text/event-stream:
+// every notification the handler emits becomes an SSE event (with an id for
+// resumability), and the final JSON-RPC response is the last event before the
+// stream closes. A write mutex serializes the handler goroutine's final write
+// against the exec copy-goroutines' notification writes.
+func (s *StreamableServer) serveSSE(w http.ResponseWriter, sess *httpSession, msg *jsonrpcMessage) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, handleMessage(s.runner, msg, sess.cancels, sess.state, dropNotify))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	var mu sync.Mutex
+	eventID := 0
+	writeEvent := func(v any) {
+		data, err := json.Marshal(v)
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		eventID++
+		fmt.Fprintf(w, "id: %d\ndata: %s\n\n", eventID, data)
+		flusher.Flush()
+		mu.Unlock()
+	}
+	notify := notifyFunc(func(method string, params any) {
+		writeEvent(jsonrpcNotification{JSONRPC: "2.0", Method: method, Params: params})
+	})
+	if resp := handleMessage(s.runner, msg, sess.cancels, sess.state, notify); resp != nil {
+		writeEvent(resp)
+	}
 }
 
 func (s *StreamableServer) authOK(r *http.Request) bool {

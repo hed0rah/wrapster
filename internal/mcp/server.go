@@ -377,9 +377,24 @@ type callMeta struct {
 
 // progressNotification is the params shape for notifications/progress.
 type progressNotification struct {
-	ProgressToken any   `json:"progressToken"`
-	Progress      int64 `json:"progress"`
+	ProgressToken any    `json:"progressToken"`
+	Progress      int64  `json:"progress"`
 	Message       string `json:"message,omitempty"`
+}
+
+// logMessage is a notifications/message record (the logging capability). Data is
+// arbitrary JSON; command output is streamed live as outputChunk values.
+type logMessage struct {
+	Level  string `json:"level"`
+	Logger string `json:"logger,omitempty"`
+	Data   any    `json:"data"`
+}
+
+// outputChunk is one sanitized slice of streamed command output, tagged by its
+// stream so a consumer can keep stdout and stderr distinct.
+type outputChunk struct {
+	Stream string `json:"stream"`
+	Text   string `json:"text"`
 }
 
 // jsonrpcNotification is a JSON-RPC notification (no ID, no response expected).
@@ -529,9 +544,20 @@ func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry, cs
 			cancel() // also stops any progress ticker
 			cr.deregister(msg.ID)
 		}()
-		// Start progress notifications if client sent a progressToken.
+		// On a progressToken opt-in, start progress ticks (timeout resilience)
+		// and attach a live-output sink so command output streams as
+		// notifications/message. This is additive -- the full result still
+		// returns in the CallToolResult. notify is the real channel on stdio and
+		// the SSE channel on Streamable HTTP; elsewhere it is dropped.
 		if params.Meta != nil && params.Meta.ProgressToken != nil {
 			startProgress(ctx, params.Meta.ProgressToken, notify)
+			ctx = output.WithSink(ctx, func(stream string, chunk []byte) {
+				notify("notifications/message", logMessage{
+					Level:  "info",
+					Logger: "wrapster.exec",
+					Data:   outputChunk{Stream: stream, Text: string(chunk)},
+				})
+			})
 		}
 		return handleToolCall(r, msg.ID, params, ctx)
 
