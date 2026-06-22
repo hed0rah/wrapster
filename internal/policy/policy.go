@@ -121,6 +121,10 @@ type CustomFilterRef struct {
 
 // HostPolicy defines what's allowed on a specific host (or as defaults).
 type HostPolicy struct {
+	// Description is a human-readable label for the host, surfaced in the
+	// hosts:// inventory resource. Optional, purely informational.
+	Description string `yaml:"description,omitempty"`
+
 	// SSH connection settings
 	Hostname     string            `yaml:"hostname"` // actual IP/hostname (if key is an alias)
 	User         string            `yaml:"user"`

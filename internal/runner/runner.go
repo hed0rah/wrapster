@@ -3,6 +3,8 @@ package runner
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +58,57 @@ func (r *Runner) OutputConfig() output.Config {
 		},
 		Stats: p.Stats,
 	}
+}
+
+// ReachResult reports TCP reachability of a host.
+type ReachResult struct {
+	Host       string `json:"host"`            // policy host name probed
+	Address    string `json:"address"`         // resolved host:port actually dialed
+	Reachable  bool   `json:"reachable"`       // true if the TCP handshake completed
+	DurationMs int64  `json:"duration_ms"`     // time spent dialing
+	Error      string `json:"error,omitempty"` // dial error (refused, timeout, ...)
+}
+
+// Reach probes TCP reachability of a policy host. It resolves the host's
+// hostname and port from the policy (port override optional), then attempts a
+// TCP connect. It is limited to policy-defined hosts -- a connect-only probe,
+// no data is sent. This is a fast diagnostic (default 5s) versus a full SSH
+// attempt: it answers "is the port open" without the multi-second SSH timeout.
+func (r *Runner) Reach(ctx context.Context, host string, port int) ReachResult {
+	res := ReachResult{Host: host}
+	if r.Policy == nil {
+		res.Error = "no policy loaded"
+		return res
+	}
+	if _, ok := r.Policy.Hosts[host]; !ok {
+		res.Error = fmt.Sprintf("unknown host %q (reach is limited to policy hosts)", host)
+		return res
+	}
+
+	resolved := r.Policy.ResolvedPolicy(host)
+	target := host
+	if resolved.Hostname != "" {
+		target = resolved.Hostname
+	}
+	if port == 0 {
+		port = resolved.Port
+	}
+	if port == 0 {
+		port = 22
+	}
+	res.Address = net.JoinHostPort(target, strconv.Itoa(port))
+
+	timeout := 5 * time.Second
+	start := time.Now()
+	conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", res.Address)
+	res.DurationMs = time.Since(start).Milliseconds()
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	conn.Close()
+	res.Reachable = true
+	return res
 }
 
 // Exec validates and runs a command on a remote host via SSH.

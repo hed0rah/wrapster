@@ -85,6 +85,7 @@ defaults:
 # Per-host overrides, merged with defaults.
 hosts:
   prod-web:
+    description: "Production web server"  # label shown in the hosts:// inventory resource
     user: deploy
     identity_file: ~/.ssh/prod_ed25519
     ssh_options:

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -630,6 +631,22 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		r.HostInfoCache.Put(host, info)
 		return respond(id, toolResult{Content: []contentBlock{{Type: "text", Text: info.JSON()}}})
 
+	case "reach":
+		host, _ := params.Arguments["host"].(string)
+		if host == "" {
+			return respondError(id, -32602, "host is required")
+		}
+		port := 0
+		if v, ok := params.Arguments["port"].(float64); ok {
+			port = int(v)
+		}
+		res := r.Reach(ctx, host, port)
+		out, _ := json.Marshal(res)
+		return respond(id, toolResult{
+			IsError: !res.Reachable,
+			Content: []contentBlock{{Type: "text", Text: string(out)}},
+		})
+
 	case "grep_output":
 		bufID, _ := params.Arguments["buf_id"].(string)
 		pattern, _ := params.Arguments["pattern"].(string)
@@ -1063,6 +1080,24 @@ func toolDefinitions() []toolDef {
 			},
 		},
 		{
+			Name:        "reach",
+			Description: "Use this to check whether a policy host's TCP port is reachable, without running a command. Fast diagnostic (5s) for connection failures: tells you if the port is open, refused, or timing out. Defaults to the host's configured SSH port; pass 'port' to probe a different one.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"host": map[string]any{"type": "string", "description": "Policy host name to probe"},
+					"port": map[string]any{"type": "integer", "description": "TCP port (default: host's configured SSH port, else 22)"},
+				},
+				"required": []string{"host"},
+			},
+			Annotations: &toolAnnotations{
+				Title:          "Check Reachability",
+				ReadOnlyHint:   boolPtr(true),
+				IdempotentHint: boolPtr(true),
+				OpenWorldHint:  boolPtr(true),
+			},
+		},
+		{
 			Name:        "grep_output",
 			Description: "Use this to search a buffered output for lines matching a regex. When exec/ssh_exec returns a buf_id, use this instead of reading the full buffer. Returns only matching lines.",
 			InputSchema: map[string]any{
@@ -1160,6 +1195,12 @@ func resourcesList(r *runner.Runner) resourcesListResult {
 			Description: "Summary of the active security policy",
 			MimeType:    "application/json",
 		},
+		{
+			URI:         "hosts://",
+			Name:        "Host Inventory",
+			Description: "All configured hosts with connection metadata (name, address, port, user, trusted, command count)",
+			MimeType:    "application/json",
+		},
 	}
 
 	// add a resource per configured host
@@ -1220,6 +1261,8 @@ func resourcesRead(r *runner.Runner, uri string) (*resourcesReadResult, error) {
 		return readStatsResource(r)
 	case uri == "policy://current":
 		return readPolicyResource(r)
+	case uri == "hosts://":
+		return readHostsResource(r)
 	case strings.HasPrefix(uri, "host://"):
 		return readHostResource(r, uri)
 	case strings.HasPrefix(uri, "buf://"):
@@ -1272,6 +1315,50 @@ func readPolicyResource(r *runner.Runner) (*resourcesReadResult, error) {
 	out, _ := json.Marshal(summary)
 	return &resourcesReadResult{
 		Contents: []resourceContent{{URI: "policy://current", MimeType: "application/json", Text: string(out)}},
+	}, nil
+}
+
+func readHostsResource(r *runner.Runner) (*resourcesReadResult, error) {
+	if r.Policy == nil {
+		return nil, fmt.Errorf("no policy loaded")
+	}
+	type hostEntry struct {
+		Name           string `json:"name"`
+		Hostname       string `json:"hostname,omitempty"`
+		Port           int    `json:"port"`
+		User           string `json:"user,omitempty"`
+		Trusted        bool   `json:"trusted"`
+		ShellOperators bool   `json:"shell_operators"`
+		CommandCount   int    `json:"command_count"`
+		Description    string `json:"description,omitempty"`
+	}
+	names := make([]string, 0, len(r.Policy.Hosts))
+	for name := range r.Policy.Hosts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	entries := make([]hostEntry, 0, len(names))
+	for _, name := range names {
+		hp := r.Policy.Hosts[name]
+		port := hp.Port
+		if port == 0 {
+			port = 22
+		}
+		entries = append(entries, hostEntry{
+			Name:           name,
+			Hostname:       hp.Hostname,
+			Port:           port,
+			User:           hp.User,
+			Trusted:        hp.Trusted,
+			ShellOperators: hp.AllowShellOperators,
+			CommandCount:   len(hp.AllowedCommands),
+			Description:    hp.Description,
+		})
+	}
+	out, _ := json.Marshal(map[string]any{"hosts": entries})
+	return &resourcesReadResult{
+		Contents: []resourceContent{{URI: "hosts://", MimeType: "application/json", Text: string(out)}},
 	}, nil
 }
 
