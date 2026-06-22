@@ -62,11 +62,34 @@ func splitSegments(cmd string) []string {
 // keywords so that \s-based deny patterns no longer match.
 var ifsPattern = regexp.MustCompile(`\$\{?IFS\}?`)
 
-// normalizeForMatch rewrites ${IFS}/$IFS to a space so the hard-deny patterns
-// cannot be split by it. Used only for matching; the unmodified command is what
-// executes (the remote shell performs the same expansion, so this is faithful).
-func normalizeForMatch(cmd string) string {
-	return ifsPattern.ReplaceAllString(cmd, " ")
+// emptyQuotePattern matches adjacent empty quote pairs ('' or "") used to split
+// a keyword mid-word: r''m -> rm, /etc/pass""wd -> /etc/passwd.
+var emptyQuotePattern = regexp.MustCompile(`''|""`)
+
+// escapedWordPattern matches a backslash escaping a word char or slash, which
+// the shell removes at quote-removal: r\m -> rm, /etc/pass\wd -> /etc/passwd.
+var escapedWordPattern = regexp.MustCompile(`\\([A-Za-z0-9/])`)
+
+// NormalizeForMatch rewrites obfuscations the shell undoes before exec so that
+// deny/filter patterns match what actually runs: ${IFS}/$IFS to a space, empty
+// quote pairs removed, backslash-escaped word chars unescaped. Used only for
+// matching -- the unmodified command is what executes, and the shell performs
+// the same expansions, so this is faithful. It cannot see through
+// runtime-valued constructs (variable values, globs, command substitution);
+// those remain accepted limitations for a string validator in front of a shell.
+func NormalizeForMatch(cmd string) string {
+	// Iterate to a fixpoint: collapsing one layer can expose another (e.g.
+	// "''" -> "" -> ""), and a stable result keeps the function idempotent. Each
+	// pass only shrinks or holds, so this terminates in at most len(cmd) rounds.
+	for {
+		s := ifsPattern.ReplaceAllString(cmd, " ")
+		s = emptyQuotePattern.ReplaceAllString(s, "")
+		s = escapedWordPattern.ReplaceAllString(s, "$1")
+		if s == cmd {
+			return s
+		}
+		cmd = s
+	}
 }
 
 // obfuscationPattern matches evasion-only constructs rejected in EVERY mode:
@@ -181,7 +204,7 @@ func ValidateCommand(cmd string, hp HostPolicy, mode ValidationMode) ValidationR
 	// the ${IFS}-normalized command so whitespace tricks cannot fragment a rule.
 	// One fused DFA pass replaces N sequential matches; only when it hits do we
 	// walk the rules to identify which pattern triggered.
-	norm := normalizeForMatch(cmd)
+	norm := NormalizeForMatch(cmd)
 	if hardDenyFused.MatchString(norm) {
 		matched := "dangerous pattern"
 		for i := range hardDenyRules {

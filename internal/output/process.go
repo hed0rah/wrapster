@@ -2,7 +2,6 @@ package output
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"sync/atomic"
 )
@@ -38,9 +37,9 @@ func DefaultConfig() Config {
 
 // Stats tracks cumulative output processing metrics.
 type Stats struct {
-	Calls     int64
-	RawBytes  int64
-	OutBytes  int64
+	Calls    int64
+	RawBytes int64
+	OutBytes int64
 }
 
 // Tracker accumulates stats across a session. Safe for concurrent use.
@@ -74,18 +73,13 @@ func (s Stats) SavingsPct() float64 {
 	return 100.0 * float64(s.RawBytes-s.OutBytes) / float64(s.RawBytes)
 }
 
-// ansiPattern matches ANSI escape sequences: CSI sequences, OSC sequences,
-// and simple two-byte escapes. Only consulted when StripANSI's byte-scan
-// finds an ESC (0x1b); clean output skips the regex entirely.
-var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b[=><78HMND]`)
-
-// StripANSI removes ANSI escape sequences from s without applying any other
-// transformations. Exported for use by the buf-store layer.
+// StripANSI removes terminal escape sequences and unsafe control bytes from s,
+// passing through printable UTF-8 plus newline and tab. It is a thin wrapper
+// over Sanitize for the buffered output path; the streaming path uses the
+// stateful Sanitizer directly. See sanitize.go for the threat model (OSC 52
+// clipboard writes, OSC 8 phishing links, transcript-rewriting cursor moves).
 func StripANSI(s string) string {
-	if strings.IndexByte(s, 0x1b) < 0 {
-		return s
-	}
-	return ansiPattern.ReplaceAllString(s, "")
+	return Sanitize(s)
 }
 
 // Process applies configured transformations to raw command output.

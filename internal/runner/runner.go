@@ -138,7 +138,7 @@ func (r *Runner) Exec(ctx context.Context, host, command string, extraSSHArgs []
 
 	// Filter chain -- catches exploit techniques that pass policy.
 	if r.Filters != nil {
-		findings := r.Filters.Block(command)
+		findings := r.Filters.Block(policy.NormalizeForMatch(command))
 		if len(findings) > 0 {
 			reason := formatFindings(findings)
 			r.Logger.Log(audit.Entry{
@@ -242,7 +242,7 @@ func (r *Runner) ExecLocal(ctx context.Context, command string) RunResult {
 
 	// Filter chain.
 	if r.Filters != nil {
-		findings := r.Filters.Block(command)
+		findings := r.Filters.Block(policy.NormalizeForMatch(command))
 		if len(findings) > 0 {
 			reason := formatFindings(findings)
 			r.Logger.Log(audit.Entry{
@@ -322,7 +322,7 @@ func (r *Runner) Validate(host, command string) RunResult {
 	}
 
 	if r.Filters != nil {
-		findings := r.Filters.Block(command)
+		findings := r.Filters.Block(policy.NormalizeForMatch(command))
 		if len(findings) > 0 {
 			return RunResult{
 				Allowed:  false,

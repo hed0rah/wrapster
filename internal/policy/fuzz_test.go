@@ -35,10 +35,10 @@ func FuzzValidateCommand(f *testing.F) {
 			t.Fatalf("non-deterministic guardrail result for %q", cmd)
 		}
 
-		// invariant 3: $IFS normalization is idempotent.
-		n := normalizeForMatch(cmd)
-		if normalizeForMatch(n) != n {
-			t.Fatalf("normalizeForMatch not idempotent for %q", cmd)
+		// invariant 3: command normalization is idempotent.
+		n := NormalizeForMatch(cmd)
+		if NormalizeForMatch(n) != n {
+			t.Fatalf("NormalizeForMatch not idempotent for %q", cmd)
 		}
 
 		_ = splitSegments(cmd)
