@@ -37,32 +37,41 @@ const (
 	stateReady        int32 = 2
 )
 
-func (cs *connState) get() int32           { return cs.state.Load() }
-func (cs *connState) set(s int32)          { cs.state.Store(s) }
-func (cs *connState) isReady() bool        { return cs.state.Load() == stateReady }
+func (cs *connState) get() int32 { return cs.state.Load() }
+func (cs *connState) set(s int32) { cs.state.Store(s) }
 
 // Version is set at build time via ldflags. Falls back to "dev".
 var Version = "dev"
 
-// supportedVersions lists MCP protocol versions this server can speak.
-var supportedVersions = map[string]bool{
-	"2024-11-05": true,
-	"2025-03-26": true,
+// supportedVersions lists the MCP protocol versions this server speaks, newest
+// first. supportedVersions[0] is advertised when a client requests a version we
+// do not support, or sends none (spec: reply with a supported version, ideally
+// the latest -- not the oldest).
+var supportedVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
+
+// defaultProtocolVersion is assumed for a Streamable HTTP request that omits the
+// MCP-Protocol-Version header after initialization (spec default).
+const defaultProtocolVersion = "2025-03-26"
+
+func isSupportedVersion(v string) bool {
+	for _, s := range supportedVersions {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
 
-const defaultVersion = "2024-11-05"
-
-// negotiateVersion returns the client's requested version if we support it,
-// otherwise falls back to the default. Logs a warning to stderr on mismatch.
+// negotiateVersion echoes the client's requested version when supported,
+// otherwise returns the latest version we support.
 func negotiateVersion(clientVersion string) string {
-	if clientVersion == "" {
-		return defaultVersion
-	}
-	if supportedVersions[clientVersion] {
+	if isSupportedVersion(clientVersion) {
 		return clientVersion
 	}
-	fmt.Fprintf(os.Stderr, "mcp: client requested unsupported protocol version %q, using %s\n", clientVersion, defaultVersion)
-	return defaultVersion
+	if clientVersion != "" {
+		fmt.Fprintf(os.Stderr, "mcp: client requested unsupported protocol version %q, using %s\n", clientVersion, supportedVersions[0])
+	}
+	return supportedVersions[0]
 }
 
 // Serve runs an MCP server over stdio. Blocks until stdin closes.
@@ -254,8 +263,13 @@ type capabilities struct {
 	Tools        *toolsCap      `json:"tools,omitempty"`
 	Resources    *resourcesCap  `json:"resources,omitempty"`
 	Prompts      *promptsCap    `json:"prompts,omitempty"`
+	Logging      *loggingCap    `json:"logging,omitempty"`
 	Experimental map[string]any `json:"experimental,omitempty"`
 }
+
+// loggingCap, when present, advertises that the server emits notifications/message
+// log records (used to stream command output chunks). It has no sub-fields.
+type loggingCap struct{}
 
 type toolsCap struct {
 	ListChanged bool `json:"listChanged"`
@@ -331,10 +345,12 @@ type resourceContent struct {
 }
 
 type toolDef struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema map[string]any  `json:"inputSchema"`
-	Annotations *toolAnnotations `json:"annotations,omitempty"`
+	Name         string           `json:"name"`
+	Title        string           `json:"title,omitempty"`
+	Description  string           `json:"description"`
+	InputSchema  map[string]any   `json:"inputSchema"`
+	OutputSchema map[string]any   `json:"outputSchema,omitempty"`
+	Annotations  *toolAnnotations `json:"annotations,omitempty"`
 }
 
 // toolAnnotations provides advisory hints per MCP spec. Hosts use these for
@@ -415,8 +431,9 @@ func startProgress(ctx context.Context, token any, notify notifyFunc) {
 }
 
 type toolResult struct {
-	Content []contentBlock `json:"content"`
-	IsError bool           `json:"isError,omitempty"`
+	Content           []contentBlock `json:"content"`
+	StructuredContent any            `json:"structuredContent,omitempty"`
+	IsError           bool           `json:"isError,omitempty"`
 }
 
 type contentBlock struct {
@@ -448,6 +465,7 @@ func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry, cs
 				Tools:        &toolsCap{},
 				Resources:    &resourcesCap{},
 				Prompts:      &promptsCap{},
+				Logging:      &loggingCap{},
 				Experimental: map[string]any{"wrapster": wrapsterExperimental},
 			},
 			ServerInfo: serverInfo{Name: "wrapster", Version: Version},
@@ -455,6 +473,12 @@ func handleMessage(r *runner.Runner, msg *jsonrpcMessage, cr *cancelRegistry, cs
 
 	case "notifications/initialized":
 		return nil // notification, no response
+
+	case "logging/setLevel":
+		// Accept and acknowledge. We declare the logging capability to stream
+		// output as notifications/message; per-level server-side filtering is not
+		// required for correctness, so the requested level is accepted and noted.
+		return respond(msg.ID, struct{}{})
 
 	case "tools/list":
 		return respond(msg.ID, toolsListResult{Tools: toolDefinitions()})
@@ -571,7 +595,8 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		result := r.Validate(host, command)
 		out, _ := json.Marshal(result)
 		return respond(id, toolResult{
-			Content: []contentBlock{{Type: "text", Text: string(out)}},
+			Content:           []contentBlock{{Type: "text", Text: string(out)}},
+			StructuredContent: result,
 		})
 
 	case "batch_exec":
@@ -604,8 +629,9 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		out, _ := json.Marshal(br)
 		hasError := br.Failed > 0 || br.Blocked > 0
 		return respond(id, toolResult{
-			IsError: hasError,
-			Content: []contentBlock{{Type: "text", Text: string(out)}},
+			IsError:           hasError,
+			Content:           []contentBlock{{Type: "text", Text: string(out)}},
+			StructuredContent: br,
 		})
 
 	case "host_info":
@@ -643,8 +669,9 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 		res := r.Reach(ctx, host, port)
 		out, _ := json.Marshal(res)
 		return respond(id, toolResult{
-			IsError: !res.Reachable,
-			Content: []contentBlock{{Type: "text", Text: string(out)}},
+			IsError:           !res.Reachable,
+			Content:           []contentBlock{{Type: "text", Text: string(out)}},
+			StructuredContent: res,
 		})
 
 	case "grep_output":
@@ -964,7 +991,7 @@ func grepFilesCmd(pattern, path, glob string, maxResults int) string {
 }
 
 func toolDefinitions() []toolDef {
-	return []toolDef{
+	tools := []toolDef{
 		{
 			Name:        "exec",
 			Description: "Use this to run a shell command on the local machine. Security filters block shell escapes, destructive ops, and exfiltration. Long output is truncated with a buf:// resource URI for paging.",
@@ -1176,6 +1203,15 @@ func toolDefinitions() []toolDef {
 			},
 		},
 	}
+	// 2025-06-18 added a top-level Tool.title distinct from the programmatic
+	// name; mirror the annotation title there so newer clients get the canonical
+	// display field while older clients keep reading annotations.title.
+	for i := range tools {
+		if tools[i].Annotations != nil {
+			tools[i].Title = tools[i].Annotations.Title
+		}
+	}
+	return tools
 }
 
 // --- Resource implementation ---

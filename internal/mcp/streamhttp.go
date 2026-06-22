@@ -130,11 +130,26 @@ func (s *StreamableServer) handlePost(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		w.Header().Set("Mcp-Session-Id", sid)
 	} else {
+		// Per the Streamable HTTP spec a non-initialize request must carry a
+		// session id. Distinguish a missing header (400 Bad Request) from a live
+		// header naming an unknown/expired session (404, which tells the client
+		// to re-initialize).
+		if sid == "" {
+			http.Error(w, "missing Mcp-Session-Id header", http.StatusBadRequest)
+			return
+		}
 		s.mu.Lock()
 		sess = s.sessions[sid]
 		s.mu.Unlock()
 		if sess == nil {
-			http.Error(w, "missing or unknown Mcp-Session-Id (re-initialize)", http.StatusNotFound)
+			http.Error(w, "unknown Mcp-Session-Id (re-initialize)", http.StatusNotFound)
+			return
+		}
+		// 2025-06-18 requires the MCP-Protocol-Version header on post-init
+		// requests; reject an explicitly unsupported value. Absent is tolerated
+		// and assumed to be the spec default (defaultProtocolVersion).
+		if pv := r.Header.Get("MCP-Protocol-Version"); pv != "" && !isSupportedVersion(pv) {
+			http.Error(w, "unsupported MCP-Protocol-Version", http.StatusBadRequest)
 			return
 		}
 	}

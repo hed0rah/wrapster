@@ -104,8 +104,8 @@ func TestInitialize(t *testing.T) {
 	if result.ServerInfo.Name != "wrapster" {
 		t.Errorf("server name = %q, want wrapster", result.ServerInfo.Name)
 	}
-	if result.ProtocolVersion != "2024-11-05" {
-		t.Errorf("protocol version = %q, want 2024-11-05", result.ProtocolVersion)
+	if result.ProtocolVersion != "2025-06-18" {
+		t.Errorf("protocol version = %q, want 2025-06-18", result.ProtocolVersion)
 	}
 }
 
@@ -115,10 +115,11 @@ func TestVersionNegotiation(t *testing.T) {
 		client   string
 		expected string
 	}{
-		{"empty defaults to 2024-11-05", "", "2024-11-05"},
+		{"empty falls back to latest", "", "2025-06-18"},
 		{"2024-11-05 echoed", "2024-11-05", "2024-11-05"},
 		{"2025-03-26 echoed", "2025-03-26", "2025-03-26"},
-		{"unknown falls back", "9999-01-01", "2024-11-05"},
+		{"2025-06-18 echoed", "2025-06-18", "2025-06-18"},
+		{"unknown falls back to latest", "9999-01-01", "2025-06-18"},
 	}
 
 	r := testRunner(t)
