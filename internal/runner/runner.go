@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hed0rah/wrapster/internal/audit"
@@ -109,6 +111,90 @@ func (r *Runner) Reach(ctx context.Context, host string, port int) ReachResult {
 	conn.Close()
 	res.Reachable = true
 	return res
+}
+
+// DiscoveredHost is an address found accepting connections during a scan.
+type DiscoveredHost struct {
+	Address string `json:"address"`
+	Port    int    `json:"port"`
+}
+
+// DiscoverResult is the outcome of a subnet scan.
+type DiscoverResult struct {
+	CIDR       string           `json:"cidr"`
+	Port       int              `json:"port"`
+	Scanned    int              `json:"scanned"`
+	Found      []DiscoveredHost `json:"found"`
+	DurationMs int64            `json:"duration_ms"`
+}
+
+// Discover scans an IPv4 subnet for hosts accepting TCP on a port (default 22)
+// to seed the policy host inventory. It is connect-only (no data is sent) and
+// bounded: at most a /24 (256 addresses), a short per-host timeout, and limited
+// concurrency. It refuses larger ranges -- this is lab discovery, not a scanner.
+func (r *Runner) Discover(ctx context.Context, cidr string, port int) (DiscoverResult, error) {
+	if port == 0 {
+		port = 22
+	}
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return DiscoverResult{}, fmt.Errorf("invalid cidr %q: %w", cidr, err)
+	}
+	if ipnet.IP.To4() == nil {
+		return DiscoverResult{}, fmt.Errorf("only IPv4 ranges are supported")
+	}
+	if ones, bits := ipnet.Mask.Size(); bits-ones > 8 {
+		return DiscoverResult{}, fmt.Errorf("range too large: %s (limit is a /24, 256 addresses)", cidr)
+	}
+
+	var ips []string
+	for ip := cloneIP(ipnet.IP.Mask(ipnet.Mask)); ipnet.Contains(ip); incIP(ip) {
+		ips = append(ips, ip.String())
+	}
+
+	res := DiscoverResult{CIDR: cidr, Port: port, Scanned: len(ips)}
+	start := time.Now()
+	dialer := &net.Dialer{Timeout: 1500 * time.Millisecond}
+	addrPort := strconv.Itoa(port)
+
+	sem := make(chan struct{}, 32) // bound concurrency
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, ip := range ips {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(ip string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, addrPort))
+			if err != nil {
+				return
+			}
+			conn.Close()
+			mu.Lock()
+			res.Found = append(res.Found, DiscoveredHost{Address: ip, Port: port})
+			mu.Unlock()
+		}(ip)
+	}
+	wg.Wait()
+	res.DurationMs = time.Since(start).Milliseconds()
+	sort.Slice(res.Found, func(i, j int) bool { return res.Found[i].Address < res.Found[j].Address })
+	return res, nil
+}
+
+func cloneIP(ip net.IP) net.IP {
+	c := make(net.IP, len(ip))
+	copy(c, ip)
+	return c
+}
+
+func incIP(ip net.IP) {
+	for i := len(ip) - 1; i >= 0; i-- {
+		ip[i]++
+		if ip[i] != 0 {
+			break
+		}
+	}
 }
 
 // Exec validates and runs a command on a remote host via SSH.

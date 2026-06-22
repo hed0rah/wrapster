@@ -700,6 +700,25 @@ func handleToolCall(r *runner.Runner, id any, params callToolParams, ctx context
 			StructuredContent: res,
 		})
 
+	case "discover_hosts":
+		cidr, _ := params.Arguments["cidr"].(string)
+		if cidr == "" {
+			return respondError(id, -32602, "cidr is required")
+		}
+		port := 0
+		if v, ok := params.Arguments["port"].(float64); ok {
+			port = int(v)
+		}
+		res, err := r.Discover(ctx, cidr, port)
+		if err != nil {
+			return respond(id, toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: err.Error()}}})
+		}
+		out, _ := json.Marshal(res)
+		return respond(id, toolResult{
+			Content:           []contentBlock{{Type: "text", Text: string(out)}},
+			StructuredContent: res,
+		})
+
 	case "grep_output":
 		bufID, _ := params.Arguments["buf_id"].(string)
 		pattern, _ := params.Arguments["pattern"].(string)
@@ -1148,6 +1167,23 @@ func toolDefinitions() []toolDef {
 				ReadOnlyHint:   boolPtr(true),
 				IdempotentHint: boolPtr(true),
 				OpenWorldHint:  boolPtr(true),
+			},
+		},
+		{
+			Name:        "discover_hosts",
+			Description: "Use this to scan a LAN subnet for hosts with a TCP port open (SSH by default), to find candidates for the policy. Connect-only probe (no data sent), limited to a /24. Returns the responsive addresses; pair with hosts:// to see what's already configured.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"cidr": map[string]any{"type": "string", "description": "IPv4 subnet to scan, e.g. 192.168.1.0/24 (max /24, 256 addresses)"},
+					"port": map[string]any{"type": "integer", "description": "TCP port to probe (default 22)"},
+				},
+				"required": []string{"cidr"},
+			},
+			Annotations: &toolAnnotations{
+				Title:         "Discover Hosts",
+				ReadOnlyHint:  boolPtr(true),
+				OpenWorldHint: boolPtr(true),
 			},
 		},
 		{
