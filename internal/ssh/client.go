@@ -1,10 +1,8 @@
 package ssh
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -13,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hed0rah/wrapster/internal/output"
 	"github.com/hed0rah/wrapster/internal/policy"
 	"github.com/hed0rah/wrapster/internal/proc"
 )
@@ -56,17 +55,17 @@ func Exec(ctx context.Context, opts ExecOptions) (*Result, error) {
 	// system vars SSH depends on (like SystemRoot for DLL loading).
 	cmd.Env = ensureSSHEnv(os.Environ())
 
-	var stdout, stderr bytes.Buffer
-
-	maxOut := opts.Policy.MaxOutputBytes
-	if maxOut <= 0 {
-		maxOut = 1 << 20 // 1 MiB default
-	}
-
-	cmd.Stdout = &limitedWriter{w: &stdout, limit: maxOut}
-	cmd.Stderr = &limitedWriter{w: &stderr, limit: maxOut}
+	// Streaming sinks over the local ssh child's pipes: sanitize and byte-cap on
+	// the fly rather than buffering raw to completion. Same model as local exec
+	// (it is just another exec.Cmd); nil callback accumulates only.
+	stdout := output.NewStreamWriter(opts.Policy.MaxOutputBytes, nil)
+	stderr := output.NewStreamWriter(opts.Policy.MaxOutputBytes, nil)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
+	stdout.Close()
+	stderr.Close()
 
 	result := &Result{
 		Stdout: stdout.String(),
@@ -263,24 +262,4 @@ func expandHome(path string) string {
 		}
 	}
 	return path
-}
-
-// limitedWriter wraps a writer and stops writing after limit bytes.
-type limitedWriter struct {
-	w       io.Writer
-	limit   int
-	written int
-}
-
-func (lw *limitedWriter) Write(p []byte) (int, error) {
-	remaining := lw.limit - lw.written
-	if remaining <= 0 {
-		return len(p), nil // silently discard
-	}
-	if len(p) > remaining {
-		p = p[:remaining]
-	}
-	n, err := lw.w.Write(p)
-	lw.written += n
-	return n, err
 }
